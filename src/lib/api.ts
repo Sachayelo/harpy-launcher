@@ -21,7 +21,10 @@ export type PackStatus = {
   state: 'unpublished' | 'install' | 'update' | 'ready'
   downloadBytes: number
   downloadFiles: number
+  profileExists: boolean
 }
+
+export type LunarState = 'missing' | 'neverOpened' | 'ready'
 
 export type SyncProgress = {
   file: string
@@ -90,13 +93,9 @@ export async function getServerStatus(): Promise<ServerStatus | null> {
   }
 }
 
-export async function findLunar(): Promise<string | null> {
-  try {
-    return await invoke<string | null>('find_lunar')
-  } catch {
-    return null
-  }
-}
+export const getLunarState = () => invoke<LunarState>('lunar_state')
+export const openLunar = () => invoke<void>('open_lunar')
+export const downloadLunar = () => invoke<void>('download_lunar')
 
 export const getSettings = () => invoke<LauncherSettings>('get_settings')
 export const setDeveloper = (enabled: boolean) => invoke<LauncherSettings>('set_developer', { enabled })
@@ -112,7 +111,6 @@ export const checkUpdate = () => invoke<UpdateCheck>('check_update')
 export const installUpdate = () => invoke<void>('install_update')
 export const getLauncherRelease = () => invoke<LauncherRelease>('launcher_release')
 export const publishLauncher = (version: string) => invoke<void>('publish_launcher', { version })
-export const syncPack = () => invoke<void>('sync_pack')
 export const play = () => invoke<PlayOutcome>('play')
 
 export const megabytes = (bytes: number) =>

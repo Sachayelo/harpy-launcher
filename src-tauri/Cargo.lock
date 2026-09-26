@@ -1404,6 +1404,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "uuid",
+ "winreg",
  "zip",
 ]
 

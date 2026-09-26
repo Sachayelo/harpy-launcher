@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { getServerStatus, type ServerStatus } from './api'
+  import { getServerStatus, type LunarState, type ServerStatus } from './api'
 
-  let { lunarFound }: { lunarFound: boolean | null } = $props()
+  let { lunar }: { lunar: LunarState | null } = $props()
 
   let server = $state<ServerStatus | null>(null)
   let checked = $state(false)
@@ -17,9 +17,12 @@
     return () => clearInterval(timer)
   })
 
-  const lunarLabel = $derived(
-    lunarFound === null ? 'Recherche de Lunar…' : lunarFound ? 'Lunar Client détecté' : 'Lunar Client introuvable',
-  )
+  const lunarLabels: Record<LunarState, string> = {
+    ready: 'Lunar Client détecté',
+    neverOpened: 'Lunar Client jamais ouvert',
+    missing: 'Lunar Client introuvable',
+  }
+  const lunarLabel = $derived(lunar ? lunarLabels[lunar] : 'Recherche de Lunar…')
 
   const serverLabel = $derived(
     !checked
@@ -31,7 +34,9 @@
 </script>
 
 <footer class="bar">
-  <span class="item" class:ok={lunarFound} class:off={lunarFound === false}>{lunarLabel}</span>
+  <span class="item" class:ok={lunar === 'ready'} class:off={lunar === 'missing' || lunar === 'neverOpened'}>
+    {lunarLabel}
+  </span>
   <span
     class="item"
     class:ok={server}

@@ -3,6 +3,7 @@ mod config;
 mod lunar;
 mod manifest;
 mod server_status;
+mod signature;
 mod sync;
 mod updater;
 
@@ -21,6 +22,8 @@ struct PackStatus {
     state: &'static str,
     download_bytes: u64,
     download_files: usize,
+    /// Lunar already has this profile, from before the launcher or an older install.
+    profile_exists: bool,
 }
 
 #[derive(Serialize)]
@@ -112,21 +115,39 @@ async fn pack_status() -> Result<PackStatus, String> {
             state: "unpublished",
             download_bytes: 0,
             download_files: 0,
+            profile_exists: false,
         });
     };
 
-    let dir = lunar::profile_dir(&target.profile_path).ok_or("Lunar Client n'est pas installé.")?;
+    // Until Lunar is set up, the whole pack is to be downloaded.
+    let dir = lunar::profile_dir(&target.profile_path)
+        .filter(|_| lunar::state() == lunar::LunarState::Ready);
+    let Some(dir) = dir else {
+        return Ok(PackStatus {
+            target,
+            version: Some(manifest.version),
+            published: Some(manifest.published),
+            notes: manifest.notes,
+            state: "install",
+            download_bytes: manifest.files.iter().map(|file| file.size).sum(),
+            download_files: manifest.files.len(),
+            profile_exists: false,
+        });
+    };
+
     let expected_command = pre_launch_command(&target);
     let (task_target, task_manifest) = (target.clone(), manifest.clone());
-    let (installed, plan) = blocking(move || {
-        let registered = lunar::registration(&task_target)?
+    let (installed, profile_exists, plan) = blocking(move || {
+        let registration = lunar::registration(&task_target)?;
+        let registered = registration
+            .as_ref()
             .is_some_and(|profile| profile.pre_launch_command.as_deref() == Some(expected_command.as_str()));
         let mut state = sync::load_state(&dir);
         let plan = sync::plan(&dir, &task_manifest, &mut state)?;
         if dir.is_dir() {
             sync::save_state(&dir, &state)?;
         }
-        Ok((registered && state.version.is_some(), plan))
+        Ok((registered && state.version.is_some(), registration.is_some(), plan))
     })
     .await?;
 
@@ -145,6 +166,7 @@ async fn pack_status() -> Result<PackStatus, String> {
         state,
         download_bytes: plan.download_bytes,
         download_files: plan.downloads.len(),
+        profile_exists,
     })
 }
 
@@ -196,13 +218,6 @@ async fn register(app: &AppHandle, target: &Target) -> Result<String, String> {
         lunar::ensure_profile(&target, &expected_command)
     })
     .await
-}
-
-#[tauri::command]
-async fn sync_pack(app: AppHandle) -> Result<(), String> {
-    let target = Target::current();
-    sync_files(&app, &target).await?;
-    register(&app, &target).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -319,12 +334,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             server_status::server_status,
-            lunar::find_lunar,
+            lunar::lunar_state,
+            lunar::open_lunar,
+            lunar::download_lunar,
             get_settings,
             set_developer,
             set_dev_channel,
             pack_status,
-            sync_pack,
             play,
             admin::repositories,
             admin::commit_and_push,

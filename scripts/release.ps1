@@ -50,6 +50,15 @@ $login = gh api user --jq .login
 if ($LASTEXITCODE -ne 0) { throw "GitHub CLI n'est pas connecté : lance « gh auth login »." }
 if (git -C $Root status --porcelain) { throw "Enregistre d'abord le code du launcher (Commit & push)." }
 
+# The launcher refuses unsigned pack manifests: they must be online before it is.
+foreach ($channel in 'dev', 'prod') {
+    try {
+        Invoke-WebRequest "https://raw.githubusercontent.com/Sachayelo/harpy-pack/main/channels/$channel.json.sig?t=$(Get-Random)" -UseBasicParsing | Out-Null
+    } catch {
+        throw "Le pack $channel n'est pas encore signé en ligne : fais d'abord Commit & push sur harpy-pack."
+    }
+}
+
 $manifest = [System.IO.File]::ReadAllText($CargoToml)
 $pattern = New-Object System.Text.RegularExpressions.Regex '(?m)^version = "([^"]+)"'
 $current = $pattern.Match($manifest).Groups[1].Value

@@ -3,6 +3,7 @@
 //! settings file only happen while the Lunar launcher is closed.
 
 use crate::config::Target;
+use serde::Serialize;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::fs;
@@ -59,17 +60,91 @@ pub fn profile_dir(profile_path: &str) -> Option<PathBuf> {
     valid.then(|| lunar_dir().map(|dir| dir.join("profiles").join(profile_path)))?
 }
 
+const DOWNLOAD_PAGE: &str = "https://www.lunarclient.com/download";
+
+/// What the player still has to do before the launcher can use Lunar.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LunarState {
+    Missing,
+    /// Installed but never opened: Lunar hasn't created its profiles yet.
+    NeverOpened,
+    Ready,
+}
+
+pub fn state() -> LunarState {
+    if lunar_executable().is_none() {
+        return LunarState::Missing;
+    }
+    let database = lunar_dir().is_some_and(|dir| dir.join("db").join("profiles.db").is_file());
+    if database {
+        LunarState::Ready
+    } else {
+        LunarState::NeverOpened
+    }
+}
+
 fn lunar_executable() -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+    let default = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
         .join("Programs")
         .join("Lunar Client")
         .join("Lunar Client.exe");
-    path.is_file().then_some(path)
+    if default.is_file() {
+        return Some(default);
+    }
+    registered_executable().filter(|path| path.is_file())
+}
+
+/// Wherever Lunar was installed, its installer registers it as the handler of
+/// lunarclient:// links.
+#[cfg(windows)]
+fn registered_executable() -> Option<PathBuf> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE].into_iter().find_map(|root| {
+        let command: String = RegKey::predef(root)
+            .open_subkey(r"Software\Classes\lunarclient\shell\open\command")
+            .ok()?
+            .get_value("")
+            .ok()?;
+        let command = command.trim();
+        let path = match command.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next()?,
+            None => &command[..command.to_lowercase().find(".exe")? + 4],
+        };
+        Some(PathBuf::from(path))
+    })
+}
+
+#[cfg(not(windows))]
+fn registered_executable() -> Option<PathBuf> {
+    None
+}
+
+fn spawn_lunar() -> Result<(), String> {
+    let executable = lunar_executable().ok_or("Lunar Client est introuvable sur ce PC.")?;
+    Command::new(executable)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Impossible d'ouvrir Lunar Client : {e}"))
 }
 
 #[tauri::command]
-pub fn find_lunar() -> Option<String> {
-    lunar_executable().map(|path| path.to_string_lossy().into_owned())
+pub fn lunar_state() -> LunarState {
+    state()
+}
+
+#[tauri::command]
+pub fn open_lunar() -> Result<(), String> {
+    spawn_lunar()
+}
+
+#[tauri::command]
+pub fn download_lunar() -> Result<(), String> {
+    open::that(DOWNLOAD_PAGE).map_err(|e| format!("Impossible d'ouvrir le navigateur : {e}"))
 }
 
 fn processes() -> System {
@@ -277,13 +352,7 @@ pub fn start_and_play(server: &str, on_step: impl Fn(&str)) -> Result<bool, Stri
     let offset = fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
 
     on_step("Ouverture de Lunar…");
-    let executable = lunar_executable().ok_or("Lunar Client est introuvable sur ce PC.")?;
-    Command::new(executable)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Impossible d'ouvrir Lunar Client : {e}"))?;
+    spawn_lunar()?;
     wait_until(Duration::from_secs(30), || log_contains_since(&log, offset, READY_MARKER));
 
     on_step("Lancement du jeu…");

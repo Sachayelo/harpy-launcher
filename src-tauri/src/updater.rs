@@ -3,9 +3,7 @@
 //! publisher's PC: a download whose signature doesn't match the public key in
 //! config.rs is never run.
 
-use crate::config::{LAUNCHER_REPO, UPDATE_PUBLIC_KEY};
-use base64::{engine::general_purpose::STANDARD, Engine};
-use minisign_verify::{PublicKey, Signature};
+use crate::config::LAUNCHER_REPO;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -124,7 +122,9 @@ pub async fn download(
         bytes.extend_from_slice(&chunk);
         on_progress(bytes.len() as u64, total);
     }
-    verify(&bytes, &platform.signature)?;
+    if !crate::signature::verify(&bytes, &platform.signature) {
+        return Err("Mise à jour refusée : elle n'est pas signée par Harpy Express.".into());
+    }
 
     let dir = std::env::temp_dir().join("harpy-launcher-update");
     // Installers of earlier updates are no longer needed.
@@ -134,23 +134,6 @@ pub async fn download(
     let path = dir.join(format!("Harpy-Launcher-Setup-{}.exe", release.version));
     fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path)
-}
-
-fn verify(data: &[u8], signature: &str) -> Result<(), String> {
-    let decode = |text: &str| {
-        STANDARD
-            .decode(text.trim())
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-    };
-    let key = decode(UPDATE_PUBLIC_KEY)
-        .and_then(|text| PublicKey::decode(&text).ok())
-        .ok_or("Clé de mise à jour invalide.")?;
-    let signature = decode(signature)
-        .and_then(|text| Signature::decode(&text).ok())
-        .ok_or("Signature de la mise à jour illisible.")?;
-    key.verify(data, &signature, true)
-        .map_err(|_| "Mise à jour refusée : elle n'est pas signée par Harpy Express.".to_string())
 }
 
 /// Starts the installer on its own. The caller must exit right away: the

@@ -1,12 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
-  import { megabytes, play, syncPack, type PackStatus, type SyncProgress } from './api'
+  import {
+    downloadLunar,
+    megabytes,
+    openLunar,
+    play,
+    type LunarState,
+    type PackStatus,
+    type SyncProgress,
+  } from './api'
 
   let {
     status,
     statusError,
-    lunarFound,
+    lunar,
     developer,
     devSelected,
     onselect,
@@ -15,7 +23,7 @@
   }: {
     status: PackStatus | null
     statusError: string
-    lunarFound: boolean | null
+    lunar: LunarState | null
     developer: boolean
     devSelected: boolean
     onselect: (dev: boolean) => void
@@ -23,7 +31,7 @@
     onbusy: (busy: boolean) => void
   } = $props()
 
-  let phase = $state<'idle' | 'syncing' | 'launching'>('idle')
+  let busy = $state(false)
   let progress = $state<SyncProgress | null>(null)
   let step = $state('')
   let message = $state('')
@@ -33,7 +41,7 @@
     progress && progress.bytesTotal ? Math.round((progress.bytesDone / progress.bytesTotal) * 100) : 0,
   )
   const fileName = $derived(progress?.file.split('/').pop() ?? '')
-  const busy = $derived(phase !== 'idle')
+  const name = $derived(status?.target.profileName ?? 'Harpy Express')
 
   $effect(() => onbusy(busy))
 
@@ -48,31 +56,36 @@
     return () => stops.forEach((stop) => stop())
   })
 
-  async function run(action: 'sync' | 'play') {
-    phase = action === 'sync' ? 'syncing' : 'launching'
+  // One button for everything: installing, updating and launching.
+  async function start() {
+    busy = true
     progress = null
     step = ''
     message = ''
     error = ''
     try {
-      if (action === 'sync') {
-        await syncPack()
-        message = 'Le pack est prêt.'
-      } else {
-        const outcome = await play()
-        message =
-          outcome === 'launched'
-            ? 'Bon voyage !'
-            : outcome === 'alreadyRunning'
-              ? 'Le jeu est déjà lancé.'
-              : `Lunar est ouvert : lance ${status?.target.profileName}.`
-      }
+      const outcome = await play()
+      message =
+        outcome === 'launched'
+          ? 'Bon voyage !'
+          : outcome === 'alreadyRunning'
+            ? 'Le jeu est déjà lancé.'
+            : `Lunar est ouvert : lance ${name}.`
     } catch (e) {
       error = String(e)
     } finally {
-      phase = 'idle'
+      busy = false
       progress = null
       onfinished()
+    }
+  }
+
+  async function help(action: () => Promise<void>) {
+    error = ''
+    try {
+      await action()
+    } catch (e) {
+      error = String(e)
     }
   }
 </script>
@@ -92,12 +105,16 @@
     </div>
   {:else}
     <div class="status">
-      {#if status?.state === 'ready'}
+      {#if lunar === 'missing' || lunar === 'neverOpened'}
+        <span class="chip">Lunar Client requis</span>
+      {:else if status?.state === 'ready'}
         <span class="chip ok">À jour</span>
       {:else if status?.state === 'update'}
         <span class="chip">Mise à jour · {megabytes(status.downloadBytes)}</span>
+      {:else if status?.state === 'install' && status.profileExists}
+        <span class="chip">Profil trouvé</span>
       {:else if status?.state === 'install'}
-        <span class="chip">Non installé</span>
+        <span class="chip">À installer · {megabytes(status.downloadBytes)}</span>
       {:else if status?.state === 'unpublished'}
         <span class="muted">Aucune version publiée</span>
       {:else if statusError}
@@ -113,40 +130,49 @@
     </div>
   {/if}
 
-  {#if phase === 'syncing'}
-    <button class="primary" disabled>Mise à jour…</button>
-  {:else if phase === 'launching'}
-    <button class="primary" disabled>Lancement…</button>
-  {:else if status?.state === 'install'}
-    <button class="primary" disabled={!lunarFound} onclick={() => run('sync')}>Installer</button>
-  {:else if status?.state === 'update'}
-    <button class="primary" disabled={!lunarFound} onclick={() => run('sync')}>Mettre à jour</button>
+  {#if lunar === 'missing'}
+    <button class="primary" onclick={() => help(downloadLunar)}>Installer Lunar</button>
+  {:else if lunar === 'neverOpened'}
+    <button class="primary" onclick={() => help(openLunar)}>Ouvrir Lunar</button>
   {:else}
-    <button class="primary" disabled={!lunarFound || status?.state !== 'ready'} onclick={() => run('play')}>
-      Jouer
+    <button
+      class="primary"
+      disabled={busy || lunar !== 'ready' || !status || status.state === 'unpublished'}
+      onclick={start}
+    >
+      {#if busy && progress}
+        Mise à jour…
+      {:else if busy}
+        Lancement…
+      {:else}
+        Jouer
+      {/if}
     </button>
   {/if}
 
-  <p class="hint" class:warn={error || lunarFound === false}>
+  <p class="hint" class:warn={error}>
     {#if error}
       {error}
-    {:else if lunarFound === false}
-      Installe Lunar Client pour jouer
-    {:else if phase === 'syncing' || (phase === 'launching' && progress)}
-      {progress
-        ? `${progress.index} / ${progress.total} fichiers · ${megabytes(progress.bytesDone)} / ${megabytes(progress.bytesTotal)}`
-        : 'Vérification des fichiers…'}
-    {:else if phase === 'launching'}
+    {:else if lunar === 'missing'}
+      Le jeu passe par Lunar Client : installe-le, ouvre-le une fois, puis reviens ici
+    {:else if lunar === 'neverOpened'}
+      Ouvre Lunar une première fois et connecte ton compte Minecraft, puis reviens ici
+    {:else if busy && progress}
+      {progress.index} / {progress.total} fichiers · {megabytes(progress.bytesDone)} / {megabytes(progress.bytesTotal)}
+    {:else if busy}
       {step || 'Vérification des fichiers…'}
     {:else if message}
       {message}
+    {:else if status?.state === 'install' && status.profileExists}
+      Ton profil {name} sera relié au launcher{status.downloadBytes > 0
+        ? ` (${megabytes(status.downloadBytes)} à télécharger)`
+        : ''}
     {:else if status?.state === 'install'}
-      {status.downloadBytes > 0 ? `${megabytes(status.downloadBytes)} · ` : ''}le profil {status.target.profileName}
-      sera ajouté à Lunar
+      Le premier lancement installe le pack puis rejoint le serveur
     {:else if status?.state === 'update'}
-      {status.downloadFiles} fichier{status.downloadFiles > 1 ? 's' : ''} à télécharger pour {status.target.profileName}
+      La mise à jour se fait au lancement, puis direction le serveur
     {:else if status?.state === 'ready'}
-      Lance {status.target.profileName} et rejoint le serveur
+      Lance {name} et rejoint le serveur
     {/if}
   </p>
 </section>

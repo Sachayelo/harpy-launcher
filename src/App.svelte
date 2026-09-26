@@ -10,20 +10,21 @@
   import { listen } from '@tauri-apps/api/event'
   import {
     checkUpdate,
-    findLunar,
+    getLunarState,
     getPackStatus,
     getSettings,
     installUpdate,
     setDevChannel,
     setDeveloper,
     type LauncherSettings,
+    type LunarState,
     type PackStatus,
     type UpdateProgress,
   } from './lib/api'
 
   let status = $state<PackStatus | null>(null)
   let statusError = $state('')
-  let lunarFound = $state<boolean | null>(null)
+  let lunar = $state<LunarState | null>(null)
   let settings = $state<LauncherSettings | null>(null)
   let view = $state<'play' | 'workshop'>('play')
   let toast = $state('')
@@ -77,6 +78,26 @@
     }
   }
 
+  // While Lunar isn't set up, keep checking: the player is installing or
+  // opening it and should not have to restart the launcher afterwards.
+  async function checkLunar() {
+    try {
+      const next = await getLunarState()
+      if (next === lunar) return
+      const becameReady = lunar !== null && next === 'ready'
+      lunar = next
+      if (becameReady) refresh()
+    } catch {
+      // Checked again below.
+    }
+  }
+
+  $effect(() => {
+    if (lunar === 'ready') return
+    const timer = setInterval(checkLunar, 3000)
+    return () => clearInterval(timer)
+  })
+
   function notify(text: string) {
     toast = text
     clearTimeout(toastTimer)
@@ -111,7 +132,7 @@
   }
 
   onMount(() => {
-    findLunar().then((path) => (lunarFound = path !== null))
+    checkLunar()
     getSettings()
       .then((next) => (settings = next))
       .catch(() => {})
@@ -150,7 +171,7 @@
       <PlayPanel
         {status}
         {statusError}
-        {lunarFound}
+        {lunar}
         developer={settings?.developer ?? false}
         devSelected={settings?.target.channel === 'dev'}
         onselect={selectDev}
@@ -159,7 +180,7 @@
       />
     </main>
   {/if}
-  <StatusBar {lunarFound} />
+  <StatusBar {lunar} />
   {#if update}
     <UpdateOverlay version={update.version} progress={update.progress} />
   {/if}
