@@ -67,6 +67,20 @@ export type PackPreview = {
   prodVersion: string | null
 }
 
+export type ServerName = 'prod' | 'dev'
+
+export type ServerInfo = {
+  state: 'running' | 'offline' | 'starting' | 'stopping' | 'unknown'
+  online: number | null
+  max: number | null
+  memoryMb: number | null
+  memoryLimitMb: number | null
+  version: string | null
+  deployedAt: string | null
+  backups: number
+  packVersion: string | null
+}
+
 export type UpdateCheck = {
   current: string
   available: string | null
@@ -107,6 +121,12 @@ export const commitAndPush = (name: string, message: string) =>
 export const getPackPreview = () => invoke<PackPreview>('pack_preview')
 export const publishPack = (notes: string[]) => invoke<void>('publish_pack', { notes })
 export const promotePack = () => invoke<void>('promote_pack')
+export const getServersStatus = () => invoke<Record<ServerName, ServerInfo>>('servers_status')
+export const serverPower = (server: ServerName, action: 'start' | 'stop' | 'restart', force: boolean) =>
+  invoke<void>('server_power', { server, action, force })
+export const serverDeploy = (server: ServerName, force: boolean) => invoke<void>('server_deploy', { server, force })
+export const serverRollback = (server: ServerName, force: boolean) =>
+  invoke<void>('server_rollback', { server, force })
 export const checkUpdate = () => invoke<UpdateCheck>('check_update')
 export const installUpdate = () => invoke<void>('install_update')
 export const getLauncherRelease = () => invoke<LauncherRelease>('launcher_release')

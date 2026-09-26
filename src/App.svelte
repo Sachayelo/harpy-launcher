@@ -6,6 +6,7 @@
   import PlayPanel from './lib/PlayPanel.svelte'
   import StatusBar from './lib/StatusBar.svelte'
   import Workshop from './lib/Workshop.svelte'
+  import Servers from './lib/Servers.svelte'
   import UpdateOverlay from './lib/UpdateOverlay.svelte'
   import { listen } from '@tauri-apps/api/event'
   import {
@@ -26,7 +27,7 @@
   let statusError = $state('')
   let lunar = $state<LunarState | null>(null)
   let settings = $state<LauncherSettings | null>(null)
-  let view = $state<'play' | 'workshop'>('play')
+  let view = $state<'play' | 'workshop' | 'servers'>('play')
   let toast = $state('')
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let request = 0
@@ -160,7 +161,11 @@
     {view}
     onview={(next) => (view = next)}
   />
-  {#if view === 'workshop'}
+  {#if view === 'servers'}
+    <div class="workshop-area">
+      <Servers />
+    </div>
+  {:else if view === 'workshop'}
     <div class="workshop-area">
       <Workshop onpublished={refresh} />
     </div>

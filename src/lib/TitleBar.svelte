@@ -2,7 +2,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window'
   import icon from '../assets/icon.png'
 
-  type View = 'play' | 'workshop'
+  type View = 'play' | 'workshop' | 'servers'
 
   let {
     admin,
@@ -23,6 +23,7 @@
     <nav class="tabs">
       <button class:active={view === 'play'} onclick={() => onview('play')}>Jouer</button>
       <button class:active={view === 'workshop'} onclick={() => onview('workshop')}>Atelier</button>
+      <button class:active={view === 'servers'} onclick={() => onview('servers')}>Serveurs</button>
     </nav>
   {/if}
 

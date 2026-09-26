@@ -3,11 +3,12 @@ mod config;
 mod lunar;
 mod manifest;
 mod server_status;
+mod servers;
 mod signature;
 mod sync;
 mod updater;
 
-use config::{Settings, Target, SERVER_HOST};
+use config::{Settings, Target};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -228,6 +229,7 @@ async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
     }
     sync_files(&app, &target).await?;
     let profile_id = register(&app, &target).await?;
+    let address = target.server_address();
 
     blocking(move || {
         if lunar::launcher_running() {
@@ -235,7 +237,7 @@ async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
             lunar::close_launcher()?;
         }
         lunar::select_profile(&profile_id)?;
-        let launched = lunar::start_and_play(SERVER_HOST, |step| {
+        let launched = lunar::start_and_play(&address, |step| {
             let _ = app.emit("launch-step", step);
         })?;
         Ok(if launched {
@@ -349,6 +351,10 @@ pub fn run() {
             admin::promote_pack,
             admin::launcher_release,
             admin::publish_launcher,
+            servers::servers_status,
+            servers::server_power,
+            servers::server_deploy,
+            servers::server_rollback,
             updater::check_update,
             updater::install_update,
         ])

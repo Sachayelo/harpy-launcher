@@ -1,7 +1,7 @@
 //! Minecraft "Server List Ping": the same request the multiplayer menu sends
 //! to show the MOTD and player count.
 
-use crate::config::{SERVER_HOST as HOST, SERVER_PORT as PORT};
+use crate::config::{Target, SERVER_HOST as HOST};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{self, Read, Write};
@@ -29,7 +29,9 @@ pub async fn server_status() -> Result<ServerStatus, String> {
 }
 
 fn query() -> io::Result<ServerStatus> {
-    let address = (HOST, PORT)
+    // The server of the profile the launcher is set to: Harpy Dev has its own.
+    let port = Target::current().server_port;
+    let address = (HOST, port)
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| io::Error::other("adresse du serveur introuvable"))?;
@@ -44,7 +46,7 @@ fn query() -> io::Result<ServerStatus> {
     write_varint(&mut handshake, PROTOCOL_1_21_1);
     write_varint(&mut handshake, HOST.len() as i32);
     handshake.extend_from_slice(HOST.as_bytes());
-    handshake.extend_from_slice(&PORT.to_be_bytes());
+    handshake.extend_from_slice(&port.to_be_bytes());
     write_varint(&mut handshake, 1);
 
     let mut request = Vec::new();
