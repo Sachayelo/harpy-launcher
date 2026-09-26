@@ -4,6 +4,7 @@ mod lunar;
 mod manifest;
 mod server_status;
 mod sync;
+mod updater;
 
 use config::{Settings, Target, SERVER_HOST};
 use serde::Serialize;
@@ -25,6 +26,7 @@ struct PackStatus {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LauncherSettings {
+    version: &'static str,
     developer: bool,
     /// Developer mode on the machine that holds the pack sources: unlocks the workshop.
     admin: bool,
@@ -35,6 +37,7 @@ impl LauncherSettings {
     fn current() -> Self {
         let developer = Settings::load().developer;
         Self {
+            version: updater::current_version(),
             developer,
             admin: developer && admin::available(),
             target: Target::current(),
@@ -58,19 +61,17 @@ pub(crate) async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// Command Lunar runs before every launch of the profile, so players stay up
-/// to date even when they start the game from Lunar directly.
+/// Command Lunar runs through cmd.exe before every launch of the profile, so
+/// players stay up to date even when they start the game from Lunar directly.
+/// Lunar refuses to start the game when this command fails: the fallback keeps
+/// a missing or broken launcher from ever locking anyone out.
 fn pre_launch_command(target: &Target) -> String {
     let executable = std::env::current_exe().unwrap_or_default();
-    let executable = executable.to_string_lossy();
-    let executable = if executable.contains(' ') {
-        format!("\"{executable}\"")
-    } else {
-        executable.into_owned()
-    };
     format!(
-        "{executable} --sync --profile {} --channel {}",
-        target.profile_path, target.channel
+        "\"{}\" --sync --profile {} --channel {} || exit 0",
+        executable.display(),
+        target.profile_path,
+        target.channel
     )
 }
 
@@ -233,6 +234,7 @@ async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
 
 /// Entry point of `--sync`, run by Lunar before each launch. Never blocks the
 /// game: whatever happens, it exits 0 and Lunar starts with what is installed.
+/// Players who only ever start the game from Lunar get launcher updates here.
 pub fn run_headless_sync(args: &[String]) -> i32 {
     let value = |flag: &str| {
         args.iter()
@@ -275,6 +277,30 @@ pub fn run_headless_sync(args: &[String]) -> i32 {
             Err(error) => format!("ERREUR {error}"),
         },
     );
+
+    if !updater::other_instance_running() {
+        let update = tauri::async_runtime::block_on(async {
+            let client = manifest::http_client();
+            let Some(release) = updater::check(&client).await? else {
+                return Ok(None);
+            };
+            let installer = updater::download(&client, &release, |_, _| {}).await?;
+            updater::launch_installer(&installer, false)?;
+            Ok::<_, String>(Some(release.version))
+        });
+        match update {
+            Ok(Some(version)) => sync::append_log(&dir, &format!("Launcher mis à jour vers {version}")),
+            Ok(None) => {}
+            Err(error) => sync::append_log(&dir, &format!("ERREUR mise à jour du launcher : {error}")),
+        }
+    }
+    0
+}
+
+/// Entry point of `--forget`, run by the uninstaller: players' profiles must
+/// keep launching once the launcher is gone.
+pub fn forget_launcher() -> i32 {
+    let _ = lunar::forget_launcher();
     0
 }
 
@@ -305,6 +331,10 @@ pub fn run() {
             admin::pack_preview,
             admin::publish_pack,
             admin::promote_pack,
+            admin::launcher_release,
+            admin::publish_launcher,
+            updater::check_update,
+            updater::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

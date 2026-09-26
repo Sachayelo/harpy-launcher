@@ -6,14 +6,19 @@
   import PlayPanel from './lib/PlayPanel.svelte'
   import StatusBar from './lib/StatusBar.svelte'
   import Workshop from './lib/Workshop.svelte'
+  import UpdateOverlay from './lib/UpdateOverlay.svelte'
+  import { listen } from '@tauri-apps/api/event'
   import {
+    checkUpdate,
     findLunar,
     getPackStatus,
     getSettings,
+    installUpdate,
     setDevChannel,
     setDeveloper,
     type LauncherSettings,
     type PackStatus,
+    type UpdateProgress,
   } from './lib/api'
 
   let status = $state<PackStatus | null>(null)
@@ -24,6 +29,40 @@
   let toast = $state('')
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let request = 0
+
+  // Launcher updates are mandatory and automatic; they only wait for the
+  // player to be done installing or launching, and for the workshop to close.
+  let busy = $state(false)
+  let pendingUpdate = $state<string | null>(null)
+  let update = $state<{ version: string; progress: UpdateProgress | null } | null>(null)
+
+  async function lookForUpdate() {
+    if (update) return
+    try {
+      const { available } = await checkUpdate()
+      if (available) pendingUpdate = available
+    } catch {
+      // Offline or GitHub unreachable: try again at the next check.
+    }
+  }
+
+  async function applyUpdate(version: string) {
+    update = { version, progress: null }
+    try {
+      await installUpdate()
+    } catch (error) {
+      update = null
+      notify(`Mise à jour du launcher impossible : ${error}`)
+    }
+  }
+
+  $effect(() => {
+    if (pendingUpdate && !update && !busy && view === 'play') {
+      const version = pendingUpdate
+      pendingUpdate = null
+      applyUpdate(version)
+    }
+  })
 
   async function refresh() {
     const current = ++request
@@ -77,11 +116,29 @@
       .then((next) => (settings = next))
       .catch(() => {})
     refresh()
+
+    lookForUpdate()
+    const timer = setInterval(lookForUpdate, 30 * 60_000)
+    let stop: (() => void) | undefined
+    listen<UpdateProgress>('update-progress', (event) => {
+      if (update) update.progress = event.payload
+    })
+      .then((unlisten) => (stop = unlisten))
+      .catch(() => {})
+    return () => {
+      clearInterval(timer)
+      stop?.()
+    }
   })
 </script>
 
 <div class="app">
-  <TitleBar admin={settings?.admin ?? false} {view} onview={(next) => (view = next)} />
+  <TitleBar
+    admin={settings?.admin ?? false}
+    version={settings?.version ?? ''}
+    {view}
+    onview={(next) => (view = next)}
+  />
   {#if view === 'workshop'}
     <div class="workshop-area">
       <Workshop onpublished={refresh} />
@@ -98,10 +155,14 @@
         devSelected={settings?.target.channel === 'dev'}
         onselect={selectDev}
         onfinished={refresh}
+        onbusy={(next) => (busy = next)}
       />
     </main>
   {/if}
   <StatusBar {lunarFound} />
+  {#if update}
+    <UpdateOverlay version={update.version} progress={update.progress} />
+  {/if}
   {#if toast}
     <div class="toast">{toast}</div>
   {/if}

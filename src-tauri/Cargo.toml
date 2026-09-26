@@ -26,6 +26,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 sysinfo = "0.33"
 open = "5"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+minisign-verify = "0.2"
 
 # Hashing 80 MB of jars is noticeably slow without optimisations, even in dev.
 [profile.dev.package.sha2]

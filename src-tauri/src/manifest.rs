@@ -62,7 +62,7 @@ pub async fn fetch(client: &reqwest::Client, channel: &str) -> Result<Option<Man
     let manifest: Manifest =
         serde_json::from_slice(&body).map_err(|e| format!("Manifeste illisible : {e}"))?;
     if manifest.schema != 1 {
-        return Err("Cette version du pack demande un launcher plus récent.".into());
+        return Err("Cette version du pack demande la dernière version du launcher : ferme-le et rouvre-le pour la recevoir.".into());
     }
     Ok(Some(manifest))
 }

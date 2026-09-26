@@ -3,11 +3,14 @@
   import { listen } from '@tauri-apps/api/event'
   import {
     commitAndPush,
+    getLauncherRelease,
     getPackPreview,
     getRepositories,
     megabytes,
     promotePack,
+    publishLauncher,
     publishPack,
+    type LauncherRelease,
     type PackPreview,
     type Repository,
   } from './api'
@@ -19,7 +22,12 @@
   let notes = $state('')
   let repositories = $state<Repository[]>([])
   let messages = $state<Record<string, string>>({})
+  let release = $state<LauncherRelease | null>(null)
+  let releaseError = $state('')
+  let releaseArmed = $state(false)
+  let armTimer: ReturnType<typeof setTimeout> | undefined
   let running = $state('')
+  let logOwner = $state('')
   let log = $state<string[]>([])
   let result = $state<{ ok: boolean; text: string } | null>(null)
 
@@ -47,6 +55,23 @@
     }
   }
 
+  const releaseBlocker = $derived.by(() => {
+    if (!release) return ''
+    if (!release.keyFound) return 'Clé de signature introuvable sur ce PC.'
+    if (repositories.find((repository) => repository.name === 'harpy-launcher')?.changeCount)
+      return "Commit & push le code du launcher d'abord."
+    return ''
+  })
+
+  async function loadRelease() {
+    releaseError = ''
+    try {
+      release = await getLauncherRelease()
+    } catch (error) {
+      releaseError = String(error)
+    }
+  }
+
   async function loadRepositories() {
     try {
       repositories = await getRepositories()
@@ -58,6 +83,7 @@
   onMount(() => {
     loadPreview()
     loadRepositories()
+    loadRelease()
     let stop: (() => void) | undefined
     listen<string>('workshop-log', (event) => (log = [...log.slice(-300), event.payload]))
       .then((unlisten) => (stop = unlisten))
@@ -67,6 +93,7 @@
 
   async function act(label: string, action: () => Promise<string>) {
     running = label
+    logOwner = label
     log = []
     result = null
     try {
@@ -100,6 +127,25 @@
       await loadPreview()
       return `Version ${version} envoyée en prod : les joueurs l'auront à leur prochain lancement.`
     })
+
+  // Every player gets it within minutes: the first click only arms the button.
+  function releaseLauncher() {
+    const version = release?.next
+    if (!version) return
+    if (!releaseArmed) {
+      releaseArmed = true
+      clearTimeout(armTimer)
+      armTimer = setTimeout(() => (releaseArmed = false), 4000)
+      return
+    }
+    releaseArmed = false
+    clearTimeout(armTimer)
+    act('launcher', async () => {
+      await publishLauncher(version)
+      await loadRelease()
+      return `Launcher ${version} en ligne : les joueurs l'auront à leur prochain lancement.`
+    })
+  }
 
   const save = (repository: Repository) =>
     act(repository.name, async () => {
@@ -153,7 +199,7 @@
         <textarea bind:value={notes} rows="3" placeholder="Nouveautés pour les joueurs, une par ligne"></textarea>
       {/if}
 
-      {#if log.length}
+      {#if log.length && logOwner !== 'launcher'}
         <pre class="log">{log.join('\n')}</pre>
       {/if}
     </div>
@@ -169,6 +215,45 @@
           Prod à jour
         {:else}
           Passer {preview?.devVersion ?? ''} en prod
+        {/if}
+      </button>
+    </div>
+  </section>
+
+  <section class="card launcher">
+    <header>
+      <h2>Launcher</h2>
+      <span class="versions">
+        {#if !release}
+          …
+        {:else if release.online}
+          en ligne <b>{release.online}</b>
+        {:else}
+          jamais publié
+        {/if}
+      </span>
+      <button class="link" disabled={!!running} onclick={loadRelease}>Actualiser</button>
+    </header>
+    {#if releaseError}
+      <p class="small warn">{releaseError}</p>
+    {:else if running === 'launcher'}
+      <p class="small">{log.at(-1) ?? 'Préparation…'}</p>
+    {:else if releaseBlocker}
+      <p class="small muted">{releaseBlocker}</p>
+    {/if}
+    <div class="actions">
+      <button
+        class="secondary"
+        class:armed={releaseArmed}
+        disabled={!release?.next || !!releaseBlocker || !!running}
+        onclick={releaseLauncher}
+      >
+        {#if running === 'launcher'}
+          Publication…
+        {:else if releaseArmed}
+          Confirmer : publier {release?.next}
+        {:else}
+          Publier la version {release?.next ?? ''}
         {/if}
       </button>
     </div>
@@ -216,10 +301,19 @@
   .workshop {
     display: grid;
     grid-template-columns: 1.25fr 1fr;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
     gap: 12px 14px;
     min-height: 0;
     padding: 16px 18px 18px;
+  }
+
+  .pack {
+    grid-row: 1 / 3;
+  }
+
+  .launcher,
+  .code {
+    grid-column: 2;
   }
 
   .card {
@@ -367,6 +461,27 @@
     border: 1px solid rgba(233, 168, 98, 0.45);
     background: none;
     color: var(--brass);
+  }
+
+  .secondary.armed {
+    background: rgba(233, 168, 98, 0.14);
+  }
+
+  .small {
+    overflow: hidden;
+    font-size: 12px;
+    color: #c9c3b8;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .small.muted {
+    color: var(--muted);
+  }
+
+  .small.warn {
+    color: var(--warn);
+    white-space: normal;
   }
 
   .actions button:disabled {

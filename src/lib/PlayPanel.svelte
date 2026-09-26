@@ -11,6 +11,7 @@
     devSelected,
     onselect,
     onfinished,
+    onbusy,
   }: {
     status: PackStatus | null
     statusError: string
@@ -19,6 +20,7 @@
     devSelected: boolean
     onselect: (dev: boolean) => void
     onfinished: () => void
+    onbusy: (busy: boolean) => void
   } = $props()
 
   let phase = $state<'idle' | 'syncing' | 'launching'>('idle')
@@ -32,6 +34,8 @@
   )
   const fileName = $derived(progress?.file.split('/').pop() ?? '')
   const busy = $derived(phase !== 'idle')
+
+  $effect(() => onbusy(busy))
 
   onMount(() => {
     const stops: Array<() => void> = []

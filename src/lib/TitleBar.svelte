@@ -4,13 +4,19 @@
 
   type View = 'play' | 'workshop'
 
-  let { admin, view, onview }: { admin: boolean; view: View; onview: (view: View) => void } = $props()
+  let {
+    admin,
+    version,
+    view,
+    onview,
+  }: { admin: boolean; version: string; view: View; onview: (view: View) => void } = $props()
 </script>
 
 <header class="titlebar" data-tauri-drag-region>
   <span class="brand" data-tauri-drag-region>
     <img src={icon} alt="" />
     Harpy Launcher
+    {#if version}<small data-tauri-drag-region>{version}</small>{/if}
   </span>
 
   {#if admin}
@@ -49,6 +55,12 @@
     align-items: center;
     gap: 8px;
     letter-spacing: 0.02em;
+  }
+
+  .brand small {
+    font-size: 11px;
+    color: #5d6574;
+    font-variant-numeric: tabular-nums;
   }
 
   .brand img {

@@ -62,6 +62,31 @@ fn desktop() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("USERPROFILE")?).join("Desktop"))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherRelease {
+    /// Version in the launcher's Cargo.toml.
+    source: Option<String>,
+    /// Version players currently get.
+    online: Option<String>,
+    /// Version the next release will carry.
+    next: Option<String>,
+    key_found: bool,
+}
+
+fn launcher_repo() -> Option<PathBuf> {
+    let repo = desktop()?.join("harpy-launcher");
+    repo.join("scripts").join("release.ps1").is_file().then_some(repo)
+}
+
+fn signing_key() -> Option<PathBuf> {
+    Some(
+        PathBuf::from(std::env::var_os("USERPROFILE")?)
+            .join(".harpy")
+            .join("launcher-update.key"),
+    )
+}
+
 fn pack_repo() -> Option<PathBuf> {
     let repo = desktop()?.join("harpy-pack");
     repo.join("scripts").join("publish.ps1").is_file().then_some(repo)
@@ -175,14 +200,17 @@ pub async fn commit_and_push(name: String, message: String) -> Result<String, St
     .await
 }
 
-/// Runs a harpy-pack script, forwarding each output line to the workshop.
-fn run_script(app: Option<&AppHandle>, script: &str, args: &[&str]) -> Result<Vec<String>, String> {
-    let repo = pack_repo().ok_or("Dépôt harpy-pack introuvable.")?;
+fn run_pack_script(app: Option<&AppHandle>, script: &str, args: &[&str]) -> Result<Vec<String>, String> {
+    run_script(app, &pack_repo().ok_or("Dépôt harpy-pack introuvable.")?, script, args)
+}
+
+/// Runs one of a repository's scripts, forwarding each output line to the workshop.
+fn run_script(app: Option<&AppHandle>, repo: &Path, script: &str, args: &[&str]) -> Result<Vec<String>, String> {
     let mut child = hidden("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(repo.join("scripts").join(script))
         .args(args)
-        .current_dir(&repo)
+        .current_dir(repo)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -232,7 +260,7 @@ fn channel_version(channel: &str) -> Option<String> {
 #[tauri::command]
 pub async fn pack_preview() -> Result<PackPreview, String> {
     crate::blocking(|| {
-        let lines = run_script(None, "publish.ps1", &["-DryRun", "-Json"])?;
+        let lines = run_pack_script(None, "publish.ps1", &["-DryRun", "-Json"])?;
         let json = lines
             .iter()
             .rev()
@@ -252,7 +280,7 @@ pub async fn publish_pack(app: AppHandle, notes: Vec<String>) -> Result<(), Stri
         let notes_file = std::env::temp_dir().join("harpy-publish-notes.txt");
         fs::write(&notes_file, notes.join("\n")).map_err(|e| e.to_string())?;
         let notes_path = notes_file.to_string_lossy().into_owned();
-        let result = run_script(Some(&app), "publish.ps1", &["-Yes", "-NotesFile", &notes_path]);
+        let result = run_pack_script(Some(&app), "publish.ps1", &["-Yes", "-NotesFile", &notes_path]);
         let _ = fs::remove_file(&notes_file);
         result.map(|_| ())
     })
@@ -261,5 +289,55 @@ pub async fn publish_pack(app: AppHandle, notes: Vec<String>) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn promote_pack(app: AppHandle) -> Result<(), String> {
-    crate::blocking(move || run_script(Some(&app), "promote.ps1", &["-Yes"]).map(|_| ())).await
+    crate::blocking(move || run_pack_script(Some(&app), "promote.ps1", &["-Yes"]).map(|_| ())).await
+}
+
+fn source_version(repo: &Path) -> Option<String> {
+    let manifest = fs::read_to_string(repo.join("src-tauri").join("Cargo.toml")).ok()?;
+    manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("version = "))
+        .map(|version| version.trim().trim_matches('"').to_owned())
+}
+
+/// The version the next release will carry: the one in Cargo.toml, unless it
+/// is already online, in which case the patch number goes up.
+fn next_version(source: &str, online: Option<&str>) -> Option<String> {
+    match online {
+        Some(online) if !crate::updater::is_newer(source, online) => {
+            let [major, minor, patch] = crate::updater::parse(online)?;
+            Some(format!("{major}.{minor}.{}", patch + 1))
+        }
+        _ => crate::updater::parse(source).map(|_| source.to_owned()),
+    }
+}
+
+#[tauri::command]
+pub async fn launcher_release() -> Result<LauncherRelease, String> {
+    let repo = launcher_repo().ok_or("Dépôt harpy-launcher introuvable.")?;
+    let online = crate::updater::latest(&crate::manifest::http_client())
+        .await?
+        .map(|release| release.version);
+    let source = source_version(&repo);
+    let next = source
+        .as_deref()
+        .and_then(|source| next_version(source, online.as_deref()));
+    Ok(LauncherRelease {
+        source,
+        online,
+        next,
+        key_found: signing_key().is_some_and(|key| key.is_file()),
+    })
+}
+
+#[tauri::command]
+pub async fn publish_launcher(app: AppHandle, version: String) -> Result<(), String> {
+    crate::blocking(move || {
+        if crate::updater::parse(&version).is_none() {
+            return Err("Numéro de version invalide.".into());
+        }
+        let repo = launcher_repo().ok_or("Dépôt harpy-launcher introuvable.")?;
+        run_script(Some(&app), &repo, "release.ps1", &["-Version", &version, "-Yes"]).map(|_| ())
+    })
+    .await
 }

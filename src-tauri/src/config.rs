@@ -3,6 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 
 pub const PACK_REPO: &str = "Sachayelo/harpy-pack";
+pub const LAUNCHER_REPO: &str = "Sachayelo/harpy-launcher";
+/// Public half of the key that signs launcher releases. The private half lives
+/// only on the publisher's PC (%USERPROFILE%\.harpy\launcher-update.key).
+pub const UPDATE_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwRDVDRENDMTdFNzcwNzUKUldSMWNPY1h6TTNWc0EzQnN5WTJYaW1kallsbUc2aDdqUlFkNzJBRGJMWi9Pc3VjOHhsMjBaVjYK";
 pub const SERVER_HOST: &str = "195.88.87.173";
 pub const SERVER_PORT: u16 = 25565;
 const APP_ID: &str = "com.sachayelo.harpylauncher";

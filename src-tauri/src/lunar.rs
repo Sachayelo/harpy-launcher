@@ -168,6 +168,18 @@ pub fn registration(target: &Target) -> Result<Option<Registration>, String> {
     find_registration(&open_database()?, target)
 }
 
+/// Removes the launcher's pre-launch sync from every profile. The profiles and
+/// their mods stay: they simply stop updating.
+pub fn forget_launcher() -> Result<usize, String> {
+    open_database()?
+        .execute(
+            "update profiles set pre_launch_command = null
+             where pre_launch_command like '%--sync --profile % --channel %'",
+            [],
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// Creates the profile folder and database entry, or adopts an existing one,
 /// and points its pre-launch command at the launcher. Lunar must be closed.
 pub fn ensure_profile(target: &Target, pre_launch_command: &str) -> Result<String, String> {

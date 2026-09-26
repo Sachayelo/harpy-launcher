@@ -6,5 +6,8 @@ fn main() {
     if args.iter().any(|arg| arg == "--sync") {
         std::process::exit(harpy_launcher_lib::run_headless_sync(&args));
     }
+    if args.iter().any(|arg| arg == "--forget") {
+        std::process::exit(harpy_launcher_lib::forget_launcher());
+    }
     harpy_launcher_lib::run();
 }

@@ -34,6 +34,7 @@ export type SyncProgress = {
 export type PlayOutcome = 'launched' | 'openedLunar' | 'alreadyRunning'
 
 export type LauncherSettings = {
+  version: string
   developer: boolean
   admin: boolean
   target: Target
@@ -63,6 +64,23 @@ export type PackPreview = {
   prodVersion: string | null
 }
 
+export type UpdateCheck = {
+  current: string
+  available: string | null
+}
+
+export type UpdateProgress = {
+  done: number
+  total: number
+}
+
+export type LauncherRelease = {
+  source: string | null
+  online: string | null
+  next: string | null
+  keyFound: boolean
+}
+
 export async function getServerStatus(): Promise<ServerStatus | null> {
   try {
     return await invoke<ServerStatus>('server_status')
@@ -89,6 +107,10 @@ export const commitAndPush = (name: string, message: string) =>
 export const getPackPreview = () => invoke<PackPreview>('pack_preview')
 export const publishPack = (notes: string[]) => invoke<void>('publish_pack', { notes })
 export const promotePack = () => invoke<void>('promote_pack')
+export const checkUpdate = () => invoke<UpdateCheck>('check_update')
+export const installUpdate = () => invoke<void>('install_update')
+export const getLauncherRelease = () => invoke<LauncherRelease>('launcher_release')
+export const publishLauncher = (version: string) => invoke<void>('publish_launcher', { version })
 export const syncPack = () => invoke<void>('sync_pack')
 export const play = () => invoke<PlayOutcome>('play')
 
