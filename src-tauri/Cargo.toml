@@ -1,6 +1,6 @@
 [package]
 name = "harpy-launcher"
-version = "0.1.0"
+version = "0.1.1"
 description = "Launcher Harpy Express"
 authors = ["Sachayelo"]
 edition = "2021"
