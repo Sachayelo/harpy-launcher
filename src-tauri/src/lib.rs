@@ -8,7 +8,7 @@ mod signature;
 mod sync;
 mod updater;
 
-use config::{Settings, Target};
+use config::{Settings, Target, SERVER_HOST};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -229,7 +229,7 @@ async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
     }
     sync_files(&app, &target).await?;
     let profile_id = register(&app, &target).await?;
-    let address = target.server_address();
+    let port = target.server_port;
 
     blocking(move || {
         if lunar::launcher_running() {
@@ -237,7 +237,7 @@ async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
             lunar::close_launcher()?;
         }
         lunar::select_profile(&profile_id)?;
-        let launched = lunar::start_and_play(&address, |step| {
+        let launched = lunar::start_and_play(SERVER_HOST, port, |step| {
             let _ = app.emit("launch-step", step);
         })?;
         Ok(if launched {

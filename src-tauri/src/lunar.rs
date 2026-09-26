@@ -343,7 +343,7 @@ fn set_game_profile(text: &str, id: &str) -> Result<String, String> {
 
 /// Starts Lunar on the selected profile, waits until it is ready, then asks it
 /// to launch the game and join the server. Returns whether the game started.
-pub fn start_and_play(server: &str, on_step: impl Fn(&str)) -> Result<bool, String> {
+pub fn start_and_play(host: &str, port: u16, on_step: impl Fn(&str)) -> Result<bool, String> {
     let log = lunar_dir()
         .ok_or("Lunar Client n'est pas installé.")?
         .join("logs")
@@ -356,7 +356,8 @@ pub fn start_and_play(server: &str, on_step: impl Fn(&str)) -> Result<bool, Stri
     wait_until(Duration::from_secs(30), || log_contains_since(&log, offset, READY_MARKER));
 
     on_step("Lancement du jeu…");
-    open::that(format!("lunarclient://play?serverAddress={server}"))
+    // Lunar rejects "host:port" in serverAddress: the port has its own parameter.
+    open::that(format!("lunarclient://play?serverAddress={host}&serverPort={port}"))
         .map_err(|e| format!("Impossible de lancer le jeu : {e}"))?;
     Ok(wait_until(Duration::from_secs(60), game_running))
 }

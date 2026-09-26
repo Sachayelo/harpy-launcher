@@ -55,14 +55,6 @@ impl Target {
         }
     }
 
-    /// Address to join, as typed in Minecraft's multiplayer menu.
-    pub fn server_address(&self) -> String {
-        if self.server_port == 25565 {
-            SERVER_HOST.to_owned()
-        } else {
-            format!("{SERVER_HOST}:{}", self.server_port)
-        }
-    }
 }
 
 /// Launcher preferences. Developer mode unlocks the dev channel, which syncs
