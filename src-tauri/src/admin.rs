@@ -71,6 +71,8 @@ pub struct LauncherRelease {
     online: Option<String>,
     /// Version the next release will carry.
     next: Option<String>,
+    /// Commits since the online version, `None` when it can't be told.
+    unreleased: Option<usize>,
     key_found: bool,
 }
 
@@ -312,6 +314,17 @@ fn next_version(source: &str, online: Option<&str>) -> Option<String> {
     }
 }
 
+/// Commits made to the launcher since `version` was released.
+fn commits_since(repo: &Path, version: &str) -> Option<usize> {
+    // Release tags are created on GitHub, not locally.
+    let _ = git(repo, &["fetch", "--tags", "--quiet"]);
+    git(repo, &["rev-list", "--count", &format!("v{version}..HEAD")])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[tauri::command]
 pub async fn launcher_release() -> Result<LauncherRelease, String> {
     let repo = launcher_repo().ok_or("Dépôt harpy-launcher introuvable.")?;
@@ -319,6 +332,13 @@ pub async fn launcher_release() -> Result<LauncherRelease, String> {
         .await?
         .map(|release| release.version);
     let source = source_version(&repo);
+    let unreleased = match online.clone() {
+        Some(online) => {
+            let repo = repo.clone();
+            crate::blocking(move || Ok(commits_since(&repo, &online))).await?
+        }
+        None => None,
+    };
     let next = source
         .as_deref()
         .and_then(|source| next_version(source, online.as_deref()));
@@ -326,6 +346,7 @@ pub async fn launcher_release() -> Result<LauncherRelease, String> {
         source,
         online,
         next,
+        unreleased,
         key_found: signing_key().is_some_and(|key| key.is_file()),
     })
 }

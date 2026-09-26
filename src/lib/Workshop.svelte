@@ -55,6 +55,8 @@
     }
   }
 
+  const launcherUpToDate = $derived(!!release?.online && release.unreleased === 0)
+
   const releaseBlocker = $derived.by(() => {
     if (!release) return ''
     if (!release.keyFound) return 'Clé de signature introuvable sur ce PC.'
@@ -245,11 +247,13 @@
       <button
         class="secondary"
         class:armed={releaseArmed}
-        disabled={!release?.next || !!releaseBlocker || !!running}
+        disabled={!release?.next || launcherUpToDate || !!releaseBlocker || !!running}
         onclick={releaseLauncher}
       >
         {#if running === 'launcher'}
           Publication…
+        {:else if launcherUpToDate}
+          Launcher à jour
         {:else if releaseArmed}
           Confirmer : publier {release?.next}
         {:else}

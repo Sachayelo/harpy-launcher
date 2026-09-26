@@ -78,6 +78,7 @@ export type LauncherRelease = {
   source: string | null
   online: string | null
   next: string | null
+  unreleased: number | null
   keyFound: boolean
 }
 
