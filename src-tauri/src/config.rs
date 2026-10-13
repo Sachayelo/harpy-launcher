@@ -1,4 +1,6 @@
+use crate::launchers::LauncherKind;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -10,8 +12,8 @@ pub const SIGNING_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1Ym
 pub const SERVER_HOST: &str = "195.88.87.173";
 const APP_ID: &str = "com.sachayelo.harpylauncher";
 
-/// A channel of the pack, the Lunar profile it is synced into and the game
-/// server that runs it.
+/// A channel of the pack, the profile it is synced into (in whichever launcher
+/// the player uses) and the game server that runs it.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Target {
@@ -66,6 +68,13 @@ pub struct Settings {
     pub developer: bool,
     #[serde(default)]
     pub dev_channel: bool,
+    /// Where the player plays: the pack goes into that launcher's profile.
+    #[serde(default)]
+    pub launcher: LauncherKind,
+    /// Folders the player picked, by "<launcher>/<channel>"; "prism" is a
+    /// MultiMC or portable Prism folder.
+    #[serde(default)]
+    pub folders: BTreeMap<String, String>,
 }
 
 impl Settings {

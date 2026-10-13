@@ -1,7 +1,12 @@
 mod admin;
+mod clock;
 mod config;
+mod crash;
+mod dialogs;
+mod launchers;
 mod lunar;
 mod manifest;
+mod news;
 mod server_status;
 mod servers;
 mod signature;
@@ -9,7 +14,10 @@ mod sync;
 mod updater;
 
 use config::{Settings, Target, SERVER_HOST};
+use launchers::{apps, official, prism, LauncherKind, Setup};
+use manifest::{Manifest, Release};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
@@ -19,12 +27,31 @@ struct PackStatus {
     target: Target,
     version: Option<String>,
     published: Option<String>,
-    notes: Vec<String>,
+    /// This version's patch note.
+    release: Option<Release>,
+    /// The channel's earlier versions, newest first.
+    history: Vec<Release>,
     state: &'static str,
     download_bytes: u64,
     download_files: usize,
-    /// Lunar already has this profile, from before the launcher or an older install.
+    /// The launcher already has this profile, from before Harpy Launcher or an older install.
     profile_exists: bool,
+}
+
+impl PackStatus {
+    fn new(target: Target, manifest: Option<&Manifest>, state: &'static str) -> Self {
+        Self {
+            target,
+            version: manifest.map(|m| m.version.clone()),
+            published: manifest.map(|m| m.published.clone()),
+            release: manifest.map(Manifest::release),
+            history: manifest.map(|m| m.history.clone()).unwrap_or_default(),
+            state,
+            download_bytes: manifest.map_or(0, |m| m.files.iter().map(|file| file.size).sum()),
+            download_files: manifest.map_or(0, |m| m.files.len()),
+            profile_exists: false,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -52,9 +79,13 @@ impl LauncherSettings {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 enum PlayOutcome {
+    /// The game is starting.
     Launched,
-    OpenedLunar,
+    /// The player's launcher is open on the pack's profile: one more click there.
+    Opened,
     AlreadyRunning,
+    /// Another launcher: the files are up to date, the player starts the game there.
+    Synced,
 }
 
 pub(crate) async fn blocking<T: Send + 'static>(
@@ -103,52 +134,72 @@ fn set_dev_channel(enabled: bool) -> Result<LauncherSettings, String> {
     Ok(LauncherSettings::current())
 }
 
+/// The game folder of the launcher the player uses, once it is set up.
+fn game_dir(target: &Target, settings: &Settings) -> Result<PathBuf, String> {
+    match launchers::locate(settings.launcher, target, settings) {
+        (Setup::Ready, Some(dir)) => Ok(dir),
+        _ => Err(format!(
+            "{} n'est pas encore prêt : suis les indications au-dessus du bouton.",
+            settings.launcher.name()
+        )),
+    }
+}
+
+/// Whether the launcher's profile is set up to run this pack (and to keep it
+/// updated, for the launchers that can), and whether it existed at all.
+fn registration(settings: &Settings, target: &Target, manifest: &Manifest) -> Result<(bool, bool), String> {
+    Ok(match settings.launcher {
+        LauncherKind::Lunar => {
+            let expected_command = pre_launch_command(target);
+            let registration = lunar::registration(target)?;
+            let registered = registration
+                .as_ref()
+                .is_some_and(|profile| profile.pre_launch_command.as_deref() == Some(expected_command.as_str()));
+            (registered, registration.is_some())
+        }
+        LauncherKind::Official => {
+            let registered = official::registered(target, manifest.loader_version());
+            (registered, registered)
+        }
+        LauncherKind::Prism => {
+            let registered = prism::find(settings)
+                .is_some_and(|install| prism::registered(&install, target, manifest.loader_version()));
+            (registered, registered)
+        }
+        LauncherKind::Modrinth | LauncherKind::Curseforge | LauncherKind::Custom => (true, true),
+    })
+}
+
+fn game_running(kind: LauncherKind, dir: &Path) -> bool {
+    match kind {
+        LauncherKind::Lunar => lunar::game_running(),
+        _ => launchers::game_running_in(dir),
+    }
+}
+
 #[tauri::command]
 async fn pack_status() -> Result<PackStatus, String> {
     let target = Target::current();
+    let settings = Settings::load();
     let client = manifest::http_client();
     let Some(manifest) = manifest::fetch(&client, &target.channel).await? else {
-        return Ok(PackStatus {
-            target,
-            version: None,
-            published: None,
-            notes: Vec::new(),
-            state: "unpublished",
-            download_bytes: 0,
-            download_files: 0,
-            profile_exists: false,
-        });
+        return Ok(PackStatus::new(target, None, "unpublished"));
     };
 
-    // Until Lunar is set up, the whole pack is to be downloaded.
-    let dir = lunar::profile_dir(&target.profile_path)
-        .filter(|_| lunar::state() == lunar::LunarState::Ready);
-    let Some(dir) = dir else {
-        return Ok(PackStatus {
-            target,
-            version: Some(manifest.version),
-            published: Some(manifest.published),
-            notes: manifest.notes,
-            state: "install",
-            download_bytes: manifest.files.iter().map(|file| file.size).sum(),
-            download_files: manifest.files.len(),
-            profile_exists: false,
-        });
+    // Until the launcher is set up, the whole pack is to be downloaded.
+    let Ok(dir) = game_dir(&target, &settings) else {
+        return Ok(PackStatus::new(target, Some(&manifest), "install"));
     };
 
-    let expected_command = pre_launch_command(&target);
     let (task_target, task_manifest) = (target.clone(), manifest.clone());
     let (installed, profile_exists, plan) = blocking(move || {
-        let registration = lunar::registration(&task_target)?;
-        let registered = registration
-            .as_ref()
-            .is_some_and(|profile| profile.pre_launch_command.as_deref() == Some(expected_command.as_str()));
+        let (registered, exists) = registration(&settings, &task_target, &task_manifest)?;
         let mut state = sync::load_state(&dir);
         let plan = sync::plan(&dir, &task_manifest, &mut state)?;
         if dir.is_dir() {
             sync::save_state(&dir, &state)?;
         }
-        Ok((registered && state.version.is_some(), registration.is_some(), plan))
+        Ok((registered && state.version.is_some(), exists, plan))
     })
     .await?;
 
@@ -160,42 +211,44 @@ async fn pack_status() -> Result<PackStatus, String> {
         "update"
     };
     Ok(PackStatus {
-        target,
-        version: Some(manifest.version),
-        published: Some(manifest.published),
-        notes: manifest.notes,
-        state,
         download_bytes: plan.download_bytes,
         download_files: plan.downloads.len(),
         profile_exists,
+        ..PackStatus::new(target, Some(&manifest), state)
     })
 }
 
-async fn sync_files(app: &AppHandle, target: &Target) -> Result<(), String> {
-    let client = manifest::http_client();
-    let manifest = manifest::fetch(&client, &target.channel)
-        .await?
-        .ok_or("Aucune version n'est publiée pour l'instant.")?;
-    let dir = lunar::profile_dir(&target.profile_path).ok_or("Lunar Client n'est pas installé.")?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let (task_dir, task_manifest) = (dir.clone(), manifest.clone());
+/// Brings the game folder in line with the manifest. `repair` hashes every file
+/// again and puts back the pack's own configs.
+async fn sync_files(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    manifest: &Manifest,
+    dir: &Path,
+    repair: bool,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let (task_dir, task_manifest) = (dir.to_path_buf(), manifest.clone());
     let (mut state, plan) = blocking(move || {
         let mut state = sync::load_state(&task_dir);
+        if repair {
+            state.cache.clear();
+            state.installed.clear();
+        }
         let plan = sync::plan(&task_dir, &task_manifest, &mut state)?;
         Ok((state, plan))
     })
     .await?;
 
     let mut last_report = Instant::now() - Duration::from_secs(1);
-    sync::apply(&client, &dir, &manifest, &plan, &mut state, |progress| {
+    sync::apply(client, dir, manifest, &plan, &mut state, |progress| {
         if last_report.elapsed() >= Duration::from_millis(80) || progress.bytes_done == progress.bytes_total {
             last_report = Instant::now();
             let _ = app.emit("sync-progress", progress);
         }
     })
     .await?;
-    sync::save_state(&dir, &state)
+    sync::save_state(dir, &state)
 }
 
 /// Makes sure Lunar knows the profile and runs the launcher before each launch.
@@ -221,16 +274,9 @@ async fn register(app: &AppHandle, target: &Target) -> Result<String, String> {
     .await
 }
 
-#[tauri::command]
-async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
-    let target = Target::current();
-    if blocking(|| Ok(lunar::game_running())).await? {
-        return Ok(PlayOutcome::AlreadyRunning);
-    }
-    sync_files(&app, &target).await?;
+async fn play_lunar(app: AppHandle, target: Target) -> Result<PlayOutcome, String> {
     let profile_id = register(&app, &target).await?;
     let port = target.server_port;
-
     blocking(move || {
         if lunar::launcher_running() {
             let _ = app.emit("launch-step", "Fermeture de Lunar…");
@@ -243,10 +289,165 @@ async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
         Ok(if launched {
             PlayOutcome::Launched
         } else {
-            PlayOutcome::OpenedLunar
+            PlayOutcome::Opened
         })
     })
     .await
+}
+
+#[tauri::command]
+async fn play(app: AppHandle) -> Result<PlayOutcome, String> {
+    let target = Target::current();
+    let settings = Settings::load();
+    let kind = settings.launcher;
+    let dir = game_dir(&target, &settings)?;
+    let task_dir = dir.clone();
+    if blocking(move || Ok(game_running(kind, &task_dir))).await? {
+        return Ok(PlayOutcome::AlreadyRunning);
+    }
+    let client = manifest::http_client();
+    let manifest = manifest::fetch(&client, &target.channel)
+        .await?
+        .ok_or("Aucune version n'est publiée pour l'instant.")?;
+    sync_files(&app, &client, &manifest, &dir, false).await?;
+
+    let (minecraft, loader) = (manifest.minecraft().to_owned(), manifest.loader_version().to_owned());
+    match kind {
+        LauncherKind::Lunar => play_lunar(app, target).await,
+        LauncherKind::Official => {
+            let _ = app.emit("launch-step", "Préparation du profil Minecraft…");
+            official::install(&client, &target, &minecraft, &loader).await?;
+            let _ = app.emit("launch-step", "Ouverture du launcher Minecraft…");
+            blocking(official::open).await?;
+            Ok(PlayOutcome::Opened)
+        }
+        LauncherKind::Prism => {
+            let install = prism::find(&settings).ok_or("Prism Launcher est introuvable.")?;
+            let _ = app.emit("launch-step", "Préparation de l'instance…");
+            blocking(move || {
+                prism::ensure_instance(&install, &target, &minecraft, &loader)?;
+                let _ = app.emit("launch-step", "Lancement par Prism…");
+                prism::launch(&install, &target)?;
+                Ok(
+                    if launchers::wait_until(Duration::from_secs(60), || launchers::game_running_in(&dir)) {
+                        PlayOutcome::Launched
+                    } else {
+                        PlayOutcome::Opened
+                    },
+                )
+            })
+            .await
+        }
+        LauncherKind::Modrinth | LauncherKind::Curseforge => {
+            blocking(move || apps::open(apps::App::of(kind))).await?;
+            Ok(PlayOutcome::Opened)
+        }
+        LauncherKind::Custom => Ok(PlayOutcome::Synced),
+    }
+}
+
+/// Modrinth App and CurseForge: hands the player the profile to import.
+#[tauri::command]
+async fn import_profile() -> Result<apps::Import, String> {
+    let target = Target::current();
+    let kind = Settings::load().launcher;
+    if !matches!(kind, LauncherKind::Modrinth | LauncherKind::Curseforge) {
+        return Err("Ce launcher n'a rien à importer.".into());
+    }
+    let manifest = manifest::fetch(&manifest::http_client(), &target.channel)
+        .await?
+        .ok_or("Aucune version n'est publiée pour l'instant.")?;
+    blocking(move || apps::start_import(apps::App::of(kind), &target, &manifest)).await
+}
+
+/// The pack's mods ("mods/x.jar") as of the last sync of this folder.
+fn pack_mods(dir: &Path) -> Vec<String> {
+    sync::load_state(dir)
+        .installed
+        .into_keys()
+        .filter(|path| path.starts_with("mods/"))
+        .collect()
+}
+
+#[tauri::command]
+async fn crash_status() -> Result<Option<crash::Crash>, String> {
+    let (target, settings) = (Target::current(), Settings::load());
+    let Ok(dir) = game_dir(&target, &settings) else {
+        return Ok(None);
+    };
+    blocking(move || Ok(crash::latest(&dir, &pack_mods(&dir)))).await
+}
+
+#[tauri::command]
+async fn crash_dismiss() -> Result<(), String> {
+    let dir = game_dir(&Target::current(), &Settings::load())?;
+    blocking(move || crash::dismiss(&dir)).await
+}
+
+/// Puts a crash report, or the game's log, on mclo.gs. Only files of the pack's
+/// game folder can be sent.
+#[tauri::command]
+async fn share_log(path: Option<String>) -> Result<String, String> {
+    let dir = game_dir(&Target::current(), &Settings::load())?;
+    let file = match path {
+        Some(path) => PathBuf::from(path),
+        None => dir.join("logs").join("latest.log"),
+    };
+    let inside = match (std::fs::canonicalize(&file), std::fs::canonicalize(&dir)) {
+        (Ok(file), Ok(dir)) => file.starts_with(dir),
+        _ => false,
+    };
+    if !inside || !file.is_file() {
+        return Err("Rapport introuvable.".into());
+    }
+    crash::share(&manifest::http_client(), &file).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Repair {
+    /// The player's own mods, moved to mods-desactives.
+    moved: usize,
+}
+
+/// Checks every file of the pack again and puts back the pack's own copies.
+#[tauri::command]
+async fn repair(app: AppHandle, disable_extra: bool) -> Result<Repair, String> {
+    let target = Target::current();
+    let settings = Settings::load();
+    let kind = settings.launcher;
+    let dir = game_dir(&target, &settings)?;
+    let task_dir = dir.clone();
+    if blocking(move || Ok(game_running(kind, &task_dir))).await? {
+        return Err("Ferme le jeu avant de réparer.".into());
+    }
+    let client = manifest::http_client();
+    let manifest = manifest::fetch(&client, &target.channel)
+        .await?
+        .ok_or("Aucune version n'est publiée pour l'instant.")?;
+    sync_files(&app, &client, &manifest, &dir, true).await?;
+    let mods: Vec<String> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .filter(|path| path.starts_with("mods/"))
+        .collect();
+    blocking(move || {
+        let moved = if disable_extra {
+            crash::disable_extra_mods(&dir, &mods)?
+        } else {
+            0
+        };
+        crash::dismiss(&dir)?;
+        Ok(Repair { moved })
+    })
+    .await
+}
+
+#[tauri::command]
+fn open_game_folder() -> Result<(), String> {
+    let dir = game_dir(&Target::current(), &Settings::load())?;
+    open::that(&dir).map_err(|e| format!("Impossible d'ouvrir le dossier : {e}"))
 }
 
 /// Entry point of `--sync`, run by Lunar before each launch. Never blocks the
@@ -259,10 +460,17 @@ pub fn run_headless_sync(args: &[String]) -> i32 {
             .and_then(|index| args.get(index + 1))
             .cloned()
     };
-    let (Some(profile), Some(channel)) = (value("--profile"), value("--channel")) else {
+    let Some(channel) = value("--channel") else {
         return 0;
     };
-    let Some(dir) = lunar::profile_dir(&profile) else {
+    // Lunar names its profile; Prism gives the instance's game folder, which
+    // the launcher has synced before (it holds .harpy).
+    let dir = match (value("--profile"), value("--dir")) {
+        (Some(profile), _) => lunar::profile_dir(&profile),
+        (None, Some(dir)) => Some(PathBuf::from(dir)).filter(|dir| dir.is_absolute() && dir.join(".harpy").is_dir()),
+        _ => None,
+    };
+    let Some(dir) = dir else {
         return 0;
     };
     if !channel.chars().all(|c| c.is_ascii_lowercase()) {
@@ -318,6 +526,11 @@ pub fn run_headless_sync(args: &[String]) -> i32 {
 /// keep launching once the launcher is gone.
 pub fn forget_launcher() -> i32 {
     let _ = lunar::forget_launcher();
+    if let Some(install) = prism::find(&Settings::load()) {
+        for target in [Target::prod(), Target::dev()] {
+            let _ = prism::forget(&install, &target);
+        }
+    }
     0
 }
 
@@ -339,16 +552,33 @@ pub fn run() {
             lunar::lunar_state,
             lunar::open_lunar,
             lunar::download_lunar,
+            launchers::launcher_state,
+            launchers::launchers,
+            launchers::set_launcher,
+            launchers::download_launcher,
+            launchers::choose_folder,
             get_settings,
             set_developer,
             set_dev_channel,
             pack_status,
             play,
+            import_profile,
+            crash_status,
+            crash_dismiss,
+            share_log,
+            repair,
+            open_game_folder,
+            news::news,
+            news::open_link,
             admin::repositories,
             admin::commit_and_push,
             admin::pack_preview,
             admin::publish_pack,
+            admin::promote_preview,
             admin::promote_pack,
+            admin::news_draft,
+            admin::publish_news,
+            admin::stage_news_image,
             admin::launcher_release,
             admin::publish_launcher,
             servers::servers_status,

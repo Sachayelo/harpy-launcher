@@ -12,6 +12,27 @@ pub struct PackFile {
     pub url: String,
 }
 
+/// One line of a patch note. `kind` is "new", "balance" or "fix".
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Change {
+    pub kind: String,
+    pub text: String,
+}
+
+/// A version as players read it in the launcher.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Release {
+    pub version: String,
+    pub published: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<Change>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
@@ -20,11 +41,58 @@ pub struct Manifest {
     pub version: String,
     pub published: String,
     #[serde(default)]
+    pub minecraft: Option<String>,
+    /// Lowest Fabric Loader the pack's mods accept, installed by launchers other than Lunar.
+    #[serde(default)]
+    pub loader_version: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Plain lines of the patch note, for launchers older than `changes`.
+    #[serde(default)]
     pub notes: Vec<String>,
+    #[serde(default)]
+    pub changes: Vec<Change>,
+    /// Earlier versions of this channel, newest first.
+    #[serde(default)]
+    pub history: Vec<Release>,
     /// Mod ids to remove from players' mods folder even though the pack never installed them.
     #[serde(default)]
     pub blocked_mods: Vec<String>,
     pub files: Vec<PackFile>,
+}
+
+pub const MINECRAFT: &str = "1.21.1";
+pub const FABRIC_LOADER: &str = "0.18.4";
+
+impl Manifest {
+    pub fn minecraft(&self) -> &str {
+        self.minecraft.as_deref().unwrap_or(MINECRAFT)
+    }
+
+    pub fn loader_version(&self) -> &str {
+        self.loader_version.as_deref().unwrap_or(FABRIC_LOADER)
+    }
+
+    /// This version's patch note; manifests from before the categories only have plain lines.
+    pub fn release(&self) -> Release {
+        let changes = if self.changes.is_empty() {
+            self.notes
+                .iter()
+                .map(|text| Change { kind: "new".into(), text: text.clone() })
+                .collect()
+        } else {
+            self.changes.clone()
+        };
+        Release {
+            version: self.version.clone(),
+            published: self.published.clone(),
+            title: self.title.clone(),
+            image: self.image.clone(),
+            changes,
+        }
+    }
 }
 
 pub fn http_client() -> reqwest::Client {
@@ -57,7 +125,16 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<Option<Vec<u8>>
 /// `Ok(None)` when nothing has been published on this channel yet. The manifest
 /// decides what runs on every player's PC, so only a signed one is trusted.
 pub async fn fetch(client: &reqwest::Client, channel: &str) -> Result<Option<Manifest>, String> {
-    let base = format!("https://raw.githubusercontent.com/{PACK_REPO}/main/channels/{channel}.json");
+    match fetch_signed(client, &format!("{channel}.json")).await? {
+        Some(body) => parse(&body, channel).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// A file of the pack repository's channels folder, only when signed by the
+/// publisher. `Ok(None)` when it doesn't exist.
+pub async fn fetch_signed(client: &reqwest::Client, name: &str) -> Result<Option<Vec<u8>>, String> {
+    let base = format!("https://raw.githubusercontent.com/{PACK_REPO}/main/channels/{name}");
     // A publication pushes the manifest and its signature together: reading them
     // in the middle of it can pair a new manifest with the old signature.
     for attempt in 0..2 {
@@ -78,7 +155,7 @@ pub async fn fetch(client: &reqwest::Client, channel: &str) -> Result<Option<Man
             .and_then(|signature| std::str::from_utf8(signature).ok())
             .is_some_and(|signature| crate::signature::verify(&body, signature));
         if signed {
-            return parse(&body, channel).map(Some);
+            return Ok(Some(body));
         }
     }
     Err("Mise à jour du pack refusée : elle n'est pas signée par Harpy Express.".into())
@@ -95,4 +172,23 @@ fn parse(body: &[u8], channel: &str) -> Result<Manifest, String> {
         return Err("Mise à jour du pack refusée : le manifeste ne correspond pas à ce canal.".into());
     }
     Ok(manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_patch_notes_and_older_manifests() {
+        let current = r#"{"schema":1,"channel":"prod","version":"v2","published":"p2","title":"Swag & Flex",
+            "changes":[{"kind":"fix","text":"x"}],"history":[{"version":"v1","published":"p1","changes":[]}],"files":[]}"#;
+        let manifest = super::parse(current.as_bytes(), "prod").unwrap();
+        assert_eq!(manifest.release().title.as_deref(), Some("Swag & Flex"));
+        assert_eq!(manifest.release().changes[0].kind, "fix");
+        assert_eq!(manifest.history[0].version, "v1");
+
+        let older = r#"{"schema":1,"channel":"prod","version":"v1","published":"p","notes":["a"],"files":[]}"#;
+        let manifest = super::parse(older.as_bytes(), "prod").unwrap();
+        assert_eq!(manifest.release().changes[0].text, "a");
+        assert_eq!(manifest.release().changes[0].kind, "new");
+        assert_eq!(manifest.loader_version(), super::FABRIC_LOADER);
+    }
 }

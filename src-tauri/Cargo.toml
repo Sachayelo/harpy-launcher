@@ -31,6 +31,8 @@ minisign-verify = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+# Windows' own file and folder pickers (the version Tauri already uses).
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
 
 # Hashing 80 MB of jars is noticeably slow without optimisations, even in dev.
 [profile.dev.package.sha2]

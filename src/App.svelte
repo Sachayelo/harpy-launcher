@@ -8,35 +8,57 @@
   import Workshop from './lib/Workshop.svelte'
   import Servers from './lib/Servers.svelte'
   import UpdateOverlay from './lib/UpdateOverlay.svelte'
+  import Announcements from './lib/Announcements.svelte'
+  import PatchNotes from './lib/PatchNotes.svelte'
+  import LauncherPicker from './lib/LauncherPicker.svelte'
+  import CrashHelp from './lib/CrashHelp.svelte'
   import { listen } from '@tauri-apps/api/event'
   import {
     checkUpdate,
-    getLunarState,
+    getCrash,
+    getLauncherState,
+    getNews,
     getPackStatus,
     getSettings,
     installUpdate,
     setDevChannel,
     setDeveloper,
+    setLauncher,
+    stored,
+    type Crash,
+    type LauncherKind,
     type LauncherSettings,
-    type LunarState,
+    type LauncherState,
+    type News as NewsData,
     type PackStatus,
     type UpdateProgress,
   } from './lib/api'
 
   let status = $state<PackStatus | null>(null)
   let statusError = $state('')
-  let lunar = $state<LunarState | null>(null)
+  let launcher = $state<LauncherState | null>(null)
   let settings = $state<LauncherSettings | null>(null)
+  let news = $state<NewsData | null>(null)
   let view = $state<'play' | 'workshop' | 'servers'>('play')
   let toast = $state('')
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let request = 0
+
+  // At most one panel over the launcher at a time.
+  let panel = $state<
+    | { kind: 'picker' }
+    | { kind: 'notes'; mode: 'whatsNew' | 'history' }
+    | { kind: 'help'; crash: Crash | null }
+    | null
+  >(null)
 
   // Launcher updates are mandatory and automatic; they only wait for the
   // player to be done installing or launching, and for the workshop to close.
   let busy = $state(false)
   let pendingUpdate = $state<string | null>(null)
   let update = $state<{ version: string; progress: UpdateProgress | null } | null>(null)
+
+  const releases = $derived(status?.release ? [status.release, ...status.history] : [])
 
   async function lookForUpdate() {
     if (update) return
@@ -79,14 +101,27 @@
     }
   }
 
-  // While Lunar isn't set up, keep checking: the player is installing or
-  // opening it and should not have to restart the launcher afterwards.
-  async function checkLunar() {
+  // Returning players get the new version's patch note once; first-timers
+  // just start remembering.
+  $effect(() => {
+    const release = status?.release
+    if (!release || !status) return
+    const key = `harpy.seenVersion.${status.target.channel}`
+    const seen = stored.get(key)
+    if (seen === release.version) return
+    stored.set(key, release.version)
+    if (seen && !panel && (release.changes.length || release.title)) {
+      panel = { kind: 'notes', mode: 'whatsNew' }
+    }
+  })
+
+  // While the launcher isn't set up, keep checking: the player is installing
+  // or opening it and should not have to restart Harpy Launcher afterwards.
+  async function checkLauncher() {
     try {
-      const next = await getLunarState()
-      if (next === lunar) return
-      const becameReady = lunar !== null && next === 'ready'
-      lunar = next
+      const next = await getLauncherState()
+      const becameReady = launcher !== null && launcher.setup !== 'ready' && next.setup === 'ready'
+      launcher = next
       if (becameReady) refresh()
     } catch {
       // Checked again below.
@@ -94,10 +129,44 @@
   }
 
   $effect(() => {
-    if (lunar === 'ready') return
-    const timer = setInterval(checkLunar, 3000)
+    if (launcher?.setup === 'ready') return
+    const timer = setInterval(checkLauncher, 3000)
     return () => clearInterval(timer)
   })
+
+  function launcherChanged(next: LauncherState) {
+    launcher = next
+    status = null
+    refresh()
+  }
+
+  async function pickLauncher(kind: LauncherKind) {
+    panel = null
+    if (kind === launcher?.kind) return
+    try {
+      launcherChanged(await setLauncher(kind))
+    } catch (error) {
+      notify(String(error))
+    }
+  }
+
+  async function loadNews() {
+    try {
+      news = await getNews()
+    } catch {
+      // Announcements are a bonus: keep the last ones.
+    }
+  }
+
+  async function lookForCrash() {
+    if (panel || busy || view !== 'play') return
+    try {
+      const crash = await getCrash()
+      if (crash && !panel) panel = { kind: 'help', crash }
+    } catch {
+      // Nothing to show.
+    }
+  }
 
   function notify(text: string) {
     toast = text
@@ -111,6 +180,8 @@
     status = null
     statusError = ''
     refresh()
+    checkLauncher()
+    loadNews()
   }
 
   async function toggleDeveloper() {
@@ -133,14 +204,23 @@
   }
 
   onMount(() => {
-    checkLunar()
+    checkLauncher()
     getSettings()
       .then((next) => (settings = next))
       .catch(() => {})
     refresh()
+    loadNews()
+    lookForCrash()
 
     lookForUpdate()
-    const timer = setInterval(lookForUpdate, 30 * 60_000)
+    const timers = [
+      setInterval(lookForUpdate, 30 * 60_000),
+      setInterval(loadNews, 3 * 60_000),
+      setInterval(lookForCrash, 60_000),
+    ]
+    // Back from the game: the first thing to know is whether it crashed.
+    const focus = () => lookForCrash()
+    window.addEventListener('focus', focus)
     let stop: (() => void) | undefined
     listen<UpdateProgress>('update-progress', (event) => {
       if (update) update.progress = event.payload
@@ -148,7 +228,8 @@
       .then((unlisten) => (stop = unlisten))
       .catch(() => {})
     return () => {
-      clearInterval(timer)
+      timers.forEach(clearInterval)
+      window.removeEventListener('focus', focus)
       stop?.()
     }
   })
@@ -170,22 +251,41 @@
       <Workshop onpublished={refresh} />
     </div>
   {:else}
-    <Hero onsecret={toggleDeveloper} />
-    <main class="deck">
-      <News {status} />
+    <div class="stage">
+      <Hero onsecret={toggleDeveloper} />
+      <Announcements {news} />
+    </div>
+    <main class="deck" class:tall={settings?.developer}>
+      <News {status} onhistory={() => (panel = { kind: 'notes', mode: 'history' })} />
       <PlayPanel
         {status}
         {statusError}
-        {lunar}
+        {launcher}
         developer={settings?.developer ?? false}
         devSelected={settings?.target.channel === 'dev'}
         onselect={selectDev}
         onfinished={refresh}
         onbusy={(next) => (busy = next)}
+        onpicker={() => (panel = { kind: 'picker' })}
+        onhelp={() => (panel = { kind: 'help', crash: null })}
+        onlauncher={launcherChanged}
       />
     </main>
   {/if}
-  <StatusBar {lunar} />
+  <StatusBar {launcher} />
+  {#if panel?.kind === 'picker'}
+    <LauncherPicker current={launcher?.kind ?? null} onpick={pickLauncher} onclose={() => (panel = null)} />
+  {:else if panel?.kind === 'notes' && releases.length}
+    <PatchNotes mode={panel.mode} {releases} onclose={() => (panel = null)} />
+  {:else if panel?.kind === 'help'}
+    <CrashHelp
+      crash={panel.crash}
+      onclose={(repaired) => {
+        panel = null
+        if (repaired) refresh()
+      }}
+    />
+  {/if}
   {#if update}
     <UpdateOverlay version={update.version} progress={update.progress} />
   {/if}
@@ -202,6 +302,12 @@
     grid-template-rows: 38px 1fr auto auto;
   }
 
+  .stage {
+    position: relative;
+    display: grid;
+    min-height: 0;
+  }
+
   .workshop-area {
     grid-row: 2 / 4;
     display: grid;
@@ -212,7 +318,13 @@
     display: grid;
     grid-template-columns: 1fr 340px;
     gap: 14px;
+    height: 226px;
     padding: 0 18px 18px;
+  }
+
+  /* Room for the Harpy Express / Harpy Dev switch. */
+  .deck.tall {
+    height: 262px;
   }
 
   .toast {

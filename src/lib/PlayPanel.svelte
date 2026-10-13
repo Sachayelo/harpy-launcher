@@ -2,33 +2,43 @@
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
   import {
-    downloadLunar,
+    chooseFolder,
+    downloadLauncher,
+    importProfile,
     megabytes,
     openLunar,
     play,
-    type LunarState,
+    type LauncherKind,
+    type LauncherState,
     type PackStatus,
+    type PlayOutcome,
     type SyncProgress,
   } from './api'
 
   let {
     status,
     statusError,
-    lunar,
+    launcher,
     developer,
     devSelected,
     onselect,
     onfinished,
     onbusy,
+    onpicker,
+    onhelp,
+    onlauncher,
   }: {
     status: PackStatus | null
     statusError: string
-    lunar: LunarState | null
+    launcher: LauncherState | null
     developer: boolean
     devSelected: boolean
     onselect: (dev: boolean) => void
     onfinished: () => void
     onbusy: (busy: boolean) => void
+    onpicker: () => void
+    onhelp: () => void
+    onlauncher: (state: LauncherState) => void
   } = $props()
 
   let busy = $state(false)
@@ -36,14 +46,36 @@
   let step = $state('')
   let message = $state('')
   let error = $state('')
+  let importing = $state('')
 
   const percent = $derived(
     progress && progress.bytesTotal ? Math.round((progress.bytesDone / progress.bytesTotal) * 100) : 0,
   )
   const fileName = $derived(progress?.file.split('/').pop() ?? '')
   const name = $derived(status?.target.profileName ?? 'Harpy Express')
+  const kind = $derived<LauncherKind>(launcher?.kind ?? 'lunar')
+  const setup = $derived(launcher?.setup ?? null)
+  const short: Record<LauncherKind, string> = {
+    lunar: 'Lunar',
+    official: 'Minecraft',
+    prism: 'Prism',
+    modrinth: 'Modrinth',
+    curseforge: 'CurseForge',
+    custom: '',
+  }
 
   $effect(() => onbusy(busy))
+
+  // Another launcher, other instructions.
+  let shownKind: LauncherKind | null = null
+  $effect(() => {
+    if (shownKind !== null && shownKind !== kind) {
+      message = ''
+      error = ''
+      importing = ''
+    }
+    shownKind = kind
+  })
 
   onMount(() => {
     const stops: Array<() => void> = []
@@ -56,6 +88,24 @@
     return () => stops.forEach((stop) => stop())
   })
 
+  function outcomeMessage(outcome: PlayOutcome) {
+    if (outcome === 'launched') return 'Bon voyage !'
+    if (outcome === 'alreadyRunning') return 'Le jeu est déjà lancé.'
+    if (outcome === 'synced') return 'Pack à jour : lance le jeu depuis ton launcher.'
+    switch (kind) {
+      case 'official':
+        return `Le launcher Minecraft est ouvert sur ${name} : clique sur Jouer.`
+      case 'prism':
+        return 'Prism prépare le jeu, il rejoindra le serveur tout seul.'
+      case 'modrinth':
+        return `Modrinth App est ouvert : lance ${name}.`
+      case 'curseforge':
+        return `CurseForge est ouvert : lance ${name}.`
+      default:
+        return `Lunar est ouvert : lance ${name}.`
+    }
+  }
+
   // One button for everything: installing, updating and launching.
   async function start() {
     busy = true
@@ -64,13 +114,7 @@
     message = ''
     error = ''
     try {
-      const outcome = await play()
-      message =
-        outcome === 'launched'
-          ? 'Bon voyage !'
-          : outcome === 'alreadyRunning'
-            ? 'Le jeu est déjà lancé.'
-            : `Lunar est ouvert : lance ${name}.`
+      message = outcomeMessage(await play())
     } catch (e) {
       error = String(e)
     } finally {
@@ -88,6 +132,24 @@
       error = String(e)
     }
   }
+
+  const pickFolder = (target: LauncherKind) =>
+    help(async () => {
+      const next = await chooseFolder(target)
+      if (next) onlauncher(next)
+    })
+
+  const startImport = () =>
+    help(async () => {
+      const result = await importProfile()
+      if (result.opened) {
+        importing = `Valide l'import de « ${name} » dans Modrinth App, puis reviens ici.`
+      } else if (kind === 'curseforge') {
+        importing = "Dans CurseForge : Créer un profil personnalisé, Importer, puis le fichier que l'Explorateur vient de montrer."
+      } else {
+        importing = `Ouvre ce fichier avec Modrinth App : ${result.path}`
+      }
+    })
 </script>
 
 <section class="card play">
@@ -98,6 +160,15 @@
     </div>
   {/if}
 
+  <div class="launcher">
+    <button class="which" disabled={busy} onclick={onpicker} title="Changer de launcher">
+      <span>Avec</span>
+      <b>{launcher?.name ?? '…'}</b>
+      <svg viewBox="0 0 10 10"><path d="M2.5 4l2.5 2.5L7.5 4" /></svg>
+    </button>
+    <button class="help" disabled={busy} onclick={onhelp}>Un souci ?</button>
+  </div>
+
   {#if busy && progress}
     <div class="progress">
       <div class="line"><b>{fileName}</b><span>{percent} %</span></div>
@@ -105,8 +176,12 @@
     </div>
   {:else}
     <div class="status">
-      {#if lunar === 'missing' || lunar === 'neverOpened'}
-        <span class="chip">Lunar Client requis</span>
+      {#if setup === 'missing'}
+        <span class="chip">{launcher?.name} introuvable</span>
+      {:else if setup === 'neverOpened'}
+        <span class="chip">Lunar Client jamais ouvert</span>
+      {:else if setup === 'needsProfile'}
+        <span class="chip">{kind === 'custom' ? 'Dossier à choisir' : 'Profil à importer'}</span>
       {:else if status?.state === 'ready'}
         <span class="chip ok">À jour</span>
       {:else if status?.state === 'update'}
@@ -130,20 +205,26 @@
     </div>
   {/if}
 
-  {#if lunar === 'missing'}
-    <button class="primary" onclick={() => help(downloadLunar)}>Installer Lunar</button>
-  {:else if lunar === 'neverOpened'}
+  {#if setup === 'missing' && kind !== 'custom'}
+    <button class="primary small" onclick={() => help(() => downloadLauncher(kind))}>Installer {short[kind]}</button>
+  {:else if setup === 'neverOpened'}
     <button class="primary" onclick={() => help(openLunar)}>Ouvrir Lunar</button>
+  {:else if setup === 'needsProfile' && kind === 'custom'}
+    <button class="primary small" onclick={() => pickFolder('custom')}>Choisir le dossier</button>
+  {:else if setup === 'needsProfile'}
+    <button class="primary small" onclick={startImport}>Importer le profil</button>
   {:else}
     <button
       class="primary"
-      disabled={busy || lunar !== 'ready' || !status || status.state === 'unpublished'}
+      disabled={busy || setup !== 'ready' || !status || status.state === 'unpublished'}
       onclick={start}
     >
       {#if busy && progress}
         Mise à jour…
       {:else if busy}
         Lancement…
+      {:else if kind === 'custom'}
+        Mettre à jour
       {:else}
         Jouer
       {/if}
@@ -153,10 +234,20 @@
   <p class="hint" class:warn={error}>
     {#if error}
       {error}
-    {:else if lunar === 'missing'}
-      Le jeu passe par Lunar Client : installe-le, ouvre-le une fois, puis reviens ici
-    {:else if lunar === 'neverOpened'}
+    {:else if setup === 'missing' && kind === 'prism'}
+      Installe Prism Launcher, ou
+      <button class="inline" onclick={() => pickFolder('prism')}>montre ton dossier MultiMC</button>
+    {:else if setup === 'missing'}
+      Installe {launcher?.name}, ouvre-le une fois, puis reviens ici
+    {:else if setup === 'neverOpened'}
       Ouvre Lunar une première fois et connecte ton compte Minecraft, puis reviens ici
+    {:else if setup === 'needsProfile' && kind === 'custom'}
+      Le dossier de ton instance Fabric 1.21.1, celui qui contient « mods »
+    {:else if setup === 'needsProfile' && importing}
+      {importing}
+    {:else if setup === 'needsProfile'}
+      Un profil Fabric 1.21.1 que le launcher remplit ·
+      <button class="inline" onclick={() => pickFolder(kind)}>il existe déjà ?</button>
     {:else if busy && progress}
       {progress.index} / {progress.total} fichiers · {megabytes(progress.bytesDone)} / {megabytes(progress.bytesTotal)}
     {:else if busy}
@@ -168,9 +259,11 @@
         ? ` (${megabytes(status.downloadBytes)} à télécharger)`
         : ''}
     {:else if status?.state === 'install'}
-      Le premier lancement installe le pack puis rejoint le serveur
+      Le premier lancement installe le pack{kind === 'custom' ? '' : ' puis rejoint le serveur'}
     {:else if status?.state === 'update'}
-      La mise à jour se fait au lancement, puis direction le serveur
+      La mise à jour se fait au lancement{kind === 'custom' ? '' : ', puis direction le serveur'}
+    {:else if status?.state === 'ready' && !launcher?.syncsItself}
+      Lance toujours le jeu d'ici : c'est ce qui le garde à jour
     {:else if status?.state === 'ready'}
       Lance {name} et rejoint le serveur
     {/if}
@@ -213,6 +306,51 @@
   }
 
   .switch button:disabled {
+    cursor: default;
+  }
+
+  .launcher {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: -4px -4px 0;
+  }
+
+  .which,
+  .help {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 4px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    font-size: 12px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .which b {
+    font-weight: 600;
+    color: #c9c3b8;
+  }
+
+  .which svg {
+    width: 10px;
+    height: 10px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+  }
+
+  .which:hover:not(:disabled) b,
+  .help:hover:not(:disabled) {
+    color: var(--brass);
+  }
+
+  .which:disabled,
+  .help:disabled {
     cursor: default;
   }
 
@@ -327,10 +465,26 @@
     filter: saturate(0.4) brightness(0.7);
   }
 
+  .primary.small {
+    font-size: 19px;
+    white-space: nowrap;
+  }
+
   .hint {
     text-align: center;
     font-size: 12px;
     color: var(--muted);
+  }
+
+  .inline {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--brass);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
   }
 
   .warn {

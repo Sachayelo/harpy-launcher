@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { getServerStatus, type LunarState, type ServerStatus } from './api'
+  import { getServerStatus, type LauncherState, type ServerStatus } from './api'
 
-  let { lunar }: { lunar: LunarState | null } = $props()
+  let { launcher }: { launcher: LauncherState | null } = $props()
 
   let server = $state<ServerStatus | null>(null)
   let checked = $state(false)
@@ -17,12 +17,21 @@
     return () => clearInterval(timer)
   })
 
-  const lunarLabels: Record<LunarState, string> = {
-    ready: 'Lunar Client détecté',
-    neverOpened: 'Lunar Client jamais ouvert',
-    missing: 'Lunar Client introuvable',
-  }
-  const lunarLabel = $derived(lunar ? lunarLabels[lunar] : 'Recherche de Lunar…')
+  const launcherLabel = $derived.by(() => {
+    if (!launcher) return 'Recherche du launcher…'
+    const custom = launcher.kind === 'custom'
+    switch (launcher.setup) {
+      case 'ready':
+        return custom ? 'Dossier du jeu choisi' : `${launcher.name} détecté`
+      case 'neverOpened':
+        return `${launcher.name} jamais ouvert`
+      case 'needsProfile':
+        return custom ? 'Aucun dossier choisi' : `Profil à importer dans ${launcher.name}`
+      default:
+        return `${launcher.name} introuvable`
+    }
+  })
+  const ready = $derived(launcher?.setup === 'ready')
 
   const serverLabel = $derived(
     !checked
@@ -34,8 +43,8 @@
 </script>
 
 <footer class="bar">
-  <span class="item" class:ok={lunar === 'ready'} class:off={lunar === 'missing' || lunar === 'neverOpened'}>
-    {lunarLabel}
+  <span class="item" class:ok={ready} class:off={!!launcher && !ready} title={launcher?.gameDir ?? undefined}>
+    {launcherLabel}
   </span>
   <span
     class="item"

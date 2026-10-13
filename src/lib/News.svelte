@@ -1,62 +1,79 @@
 <script lang="ts">
+  import ReleaseCard from './ReleaseCard.svelte'
   import type { PackStatus } from './api'
 
-  let { status }: { status: PackStatus | null } = $props()
+  let { status, onhistory }: { status: PackStatus | null; onhistory: () => void } = $props()
 
-  const date = $derived(
-    status?.published
-      ? new Date(status.published).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })
-      : '',
-  )
+  const dev = $derived(status?.target.channel === 'dev')
 </script>
 
-<section class="card">
-  <h2>Nouveautés</h2>
-  {#if status?.notes.length}
-    <ul>
-      {#each status.notes as note, i (i)}
-        <li>{note}</li>
-      {/each}
-    </ul>
-  {:else}
-    <p class="empty">Les nouveautés de chaque version s'afficheront ici.</p>
-  {/if}
-  {#if status?.version}
-    <p class="date">Version {status.version} · {date}</p>
-  {/if}
+<section class="card news">
+  <header>
+    <h2>Nouveautés</h2>
+    {#if dev}
+      <span class="badge" title="Ce que tu lis là, seuls les testeurs le voient">Journal dev</span>
+    {/if}
+    {#if status?.history.length}
+      <button class="link" onclick={onhistory}>Historique</button>
+    {/if}
+  </header>
+  <div class="scroll">
+    {#if status?.release}
+      <ReleaseCard release={status.release} compact />
+    {:else}
+      <p class="empty">Les nouveautés de chaque version s'afficheront ici.</p>
+    {/if}
+  </div>
 </section>
 
 <style>
-  ul {
-    list-style: none;
-    padding: 0;
-    display: grid;
-    gap: 6px;
-  }
-
-  li {
+  .news {
     display: flex;
-    gap: 10px;
-    color: #c9c3b8;
+    flex-direction: column;
+    min-height: 0;
   }
 
-  li::before {
-    content: '';
-    flex: none;
-    width: 5px;
-    height: 5px;
-    margin-top: 8px;
-    border-radius: 50%;
-    background: var(--brass-deep);
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  header h2 {
+    margin: 0;
+  }
+
+  .badge {
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: rgba(140, 184, 239, 0.12);
+    font-size: 11px;
+    font-weight: 600;
+    color: #8cb8ef;
+  }
+
+  .link {
+    margin-left: auto;
+    border: 0;
+    background: none;
+    font-size: 12px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .link:hover {
+    color: var(--brass);
+  }
+
+  .scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
   }
 
   .empty {
-    color: var(--muted);
-  }
-
-  .date {
-    margin-top: 10px;
-    font-size: 12px;
     color: var(--muted);
   }
 </style>

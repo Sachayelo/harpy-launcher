@@ -1,6 +1,10 @@
 //! The workshop: publishing the pack and saving code from the launcher. Only
 //! available on the machine that holds the harpy-pack repository.
 
+use crate::config::PACK_REPO;
+use crate::manifest::{Change, Release};
+use crate::news::NewsFile;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -276,22 +280,135 @@ pub async fn pack_preview() -> Result<PackPreview, String> {
     .await
 }
 
+/// A patch note as written in the workshop.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseNotes {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    image: String,
+    #[serde(default)]
+    changes: Vec<Change>,
+}
+
+/// Runs a pack script on a JSON file holding its input.
+fn run_with_file<T: Serialize>(app: &AppHandle, script: &str, flag: &str, data: &T) -> Result<(), String> {
+    let file = std::env::temp_dir().join(format!("harpy-{}.json", uuid::Uuid::new_v4()));
+    fs::write(&file, serde_json::to_vec(data).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let path = file.to_string_lossy().into_owned();
+    let result = run_pack_script(Some(app), script, &["-Yes", flag, &path]);
+    let _ = fs::remove_file(&file);
+    result.map(|_| ())
+}
+
+/// Publishes pack/ on dev. The note goes into dev's journal: it reaches players
+/// through the prod patch note only.
 #[tauri::command]
-pub async fn publish_pack(app: AppHandle, notes: Vec<String>) -> Result<(), String> {
-    crate::blocking(move || {
-        let notes_file = std::env::temp_dir().join("harpy-publish-notes.txt");
-        fs::write(&notes_file, notes.join("\n")).map_err(|e| e.to_string())?;
-        let notes_path = notes_file.to_string_lossy().into_owned();
-        let result = run_pack_script(Some(&app), "publish.ps1", &["-Yes", "-NotesFile", &notes_path]);
-        let _ = fs::remove_file(&notes_file);
-        result.map(|_| ())
+pub async fn publish_pack(app: AppHandle, notes: ReleaseNotes) -> Result<(), String> {
+    crate::blocking(move || run_with_file(&app, "publish.ps1", "-ChangesFile", &notes)).await
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotePreview {
+    dev_version: String,
+    prod_version: Option<String>,
+    nothing: bool,
+    /// What was published on dev since the version in prod, newest first.
+    #[serde(default)]
+    pending: Vec<Release>,
+}
+
+#[tauri::command]
+pub async fn promote_preview() -> Result<PromotePreview, String> {
+    crate::blocking(|| {
+        let lines = run_pack_script(None, "promote.ps1", &["-DryRun", "-Json"])?;
+        let json = lines
+            .iter()
+            .rev()
+            .find_map(|line| line.strip_prefix("HARPY_JSON:"))
+            .ok_or("Le script de passage en prod a répondu de façon inattendue.")?;
+        serde_json::from_str(json).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Sends dev's version to every player, with the patch note they will read.
+#[tauri::command]
+pub async fn promote_pack(app: AppHandle, notes: ReleaseNotes) -> Result<(), String> {
+    crate::blocking(move || run_with_file(&app, "promote.ps1", "-ChangesFile", &notes)).await
+}
+
+/// The announcements as last published from this PC.
+#[tauri::command]
+pub async fn news_draft() -> Result<NewsFile, String> {
+    crate::blocking(|| {
+        let path = pack_repo().ok_or("Dépôt harpy-pack introuvable.")?.join("channels").join("news.json");
+        match fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}'))
+                .map_err(|e| format!("news.json illisible : {e}")),
+            Err(_) => Ok(NewsFile::default()),
+        }
     })
     .await
 }
 
 #[tauri::command]
-pub async fn promote_pack(app: AppHandle) -> Result<(), String> {
-    crate::blocking(move || run_pack_script(Some(&app), "promote.ps1", &["-Yes"]).map(|_| ())).await
+pub async fn publish_news(app: AppHandle, news: NewsFile) -> Result<(), String> {
+    crate::blocking(move || run_with_file(&app, "announce.ps1", "-File", &news)).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedImage {
+    /// Where players load it from once pushed.
+    url: String,
+    /// The image itself, for the workshop's preview until then.
+    preview: String,
+}
+
+/// Copies an image into harpy-pack/news; it goes online with the next prod or announcement.
+#[tauri::command]
+pub async fn stage_news_image(app: AppHandle) -> Result<Option<StagedImage>, String> {
+    let owner = crate::dialogs::owner(&app);
+    crate::blocking(move || {
+        let filter = ("Images", "*.png;*.jpg;*.jpeg;*.webp;*.gif");
+        let Some(source) = crate::dialogs::pick_file(owner, "Image de la note de version", filter)? else {
+            return Ok(None);
+        };
+        let bytes = fs::read(&source).map_err(|e| e.to_string())?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err("Image trop lourde : 4 Mo au plus (chaque joueur la télécharge).".into());
+        }
+        let extension = source
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
+            .filter(|ext| ["png", "jpg", "jpeg", "webp", "gif"].contains(&ext.as_str()))
+            .ok_or("Format d'image non pris en charge.")?;
+        let stem: String = source
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let name = format!("{}-{}.{extension}", crate::clock::now_secs(), stem.trim_matches('-'));
+        let folder = pack_repo().ok_or("Dépôt harpy-pack introuvable.")?.join("news");
+        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        fs::write(folder.join(&name), &bytes).map_err(|e| e.to_string())?;
+        let mime = match extension.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => "image/png",
+        };
+        Ok(Some(StagedImage {
+            url: format!("https://raw.githubusercontent.com/{PACK_REPO}/main/news/{name}"),
+            preview: format!("data:{mime};base64,{}", STANDARD.encode(&bytes)),
+        }))
+    })
+    .await
 }
 
 fn source_version(repo: &Path) -> Option<String> {
